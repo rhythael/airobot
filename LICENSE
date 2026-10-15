@@ -2,3 +2,5 @@ Portfolio copy — © 2026 Heyao Rong. Written for SmartFoodie GmbH, which holds
 published here with the company's agreement for the purpose of demonstrating the author's work.
 All rights reserved; no licence is granted to reuse this code. The patch file contains fragments
 of xiaozhi-esp32-server (© xinnan-tech, MIT License) as diff context.
+
+The full MIT licence text of xiaozhi-esp32-server is kept in server/patches/UPSTREAM-LICENSE-MIT.txt.
