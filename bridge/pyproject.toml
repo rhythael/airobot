@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuya-enterprise-bridge"
+version = "0.1.0"
+requires-python = ">=3.11"
+# 语音链路只用到 machine_mcp_server / inventory / central_kitchen，这三样只依赖 fastmcp 和 httpx。
+# 公司在 Linux / Docker 上部署语音桥不必装它们。
+dependencies = [
+  "fastmcp==4.0.3",
+  "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+macos = ["keyring>=25"]
+dev = [
+  "pytest==8.4.2",
+  "pytest-asyncio==1.2.0",
+]
+
+[project.scripts]
+smartfoodie-machine-mcp = "tuya_enterprise_bridge.machine_mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"

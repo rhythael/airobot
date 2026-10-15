@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+# 这些脚本是处理 API key 的入口，明文配置一律不进版本控制
+.env
+*.env
+.config.yaml
+.secrets.yaml
+*credential*.json
+*secret*.json
+*token*.json

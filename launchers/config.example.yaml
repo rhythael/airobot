@@ -1,0 +1,145 @@
+# SmartFoodie 041 语音服务端配置示例（交付版）。
+# 复制为 server/main/xiaozhi-server/data/.config.yaml 后按机器情况改模型目录、音色、端口；
+# 密钥一律不写在这个文件里：启动脚本 launchers/start_server.py 从环境变量 / 仓库根目录 .env 读取
+# LLM_API_KEY、SPEECH_APPID、SPEECH_ACCESS_TOKEN，只注入内存。
+# 各项参数为什么这么选，见 server/main/xiaozhi-server/CONFIG_NOTES.md。
+# EN: example server config. Copy to server/main/xiaozhi-server/data/.config.yaml and adjust model
+#     directories, voices and ports. Never put keys here: launchers/start_server.py reads LLM_API_KEY,
+#     SPEECH_APPID and SPEECH_ACCESS_TOKEN from .env / the environment. Rationale: CONFIG_NOTES.md.
+
+delete_audio: true
+
+# 回答说完后响一声短提示音（约 0.3 秒）。设备没有回声消除，说话时不收音，
+# 顾客在机器话音刚落时接话，开头几个字会丢；提示音告诉顾客「现在可以说了」。
+listen_cue: true
+
+
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  timezone_offset: +2
+
+selected_module:
+  VAD: SileroVAD
+  ASR: WhisperASR
+  LLM: DoubaoLLM   # OpenAI 兼容接口，任何机器都能用；ClaudeCLI 依赖个人 Claude Code 登录，仅限开发机
+  TTS: EdgeTTS
+  Memory: nomem
+  Intent: function_call
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    # min_silence_duration_ms 由 launchers/start_server.py 注入（当前 600ms），改那边；
+    # 这里不写，避免两处真相。直接跑 app.py 时会用上游默认 200ms。
+
+ASR:
+  WhisperASR:
+    type: sherpa_onnx_local
+    model_type: whisper
+    # base 的德语识别不可用：实测把 "hat 9 leere Fächer" 听成 "hat neuen Lehrefechern"，
+    # 中文货道号 "1-7道" 听成 "1港7道"。small 两者都正确。
+    # 代价是单次识别从约 0.3-0.5 秒涨到约 1.0-1.9 秒。
+    # 德语是门店顾客的主要语言，听错问题比慢一秒严重得多。
+    model_dir: models/sherpa-onnx-whisper-small
+    zh_model_dir: models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+    output_dir: tmp/
+    language: ""
+    # 识别前把 3.5kHz 以上补 6dB。板载 PDM 麦克风高频比 Mac 弱约 7dB，辅音被听混。
+    # 真机录音字错率 19.8% → 13.9%，干净语音不受影响。0 为关闭。
+    highshelf_db: 6
+
+LLM:
+  # 备用：火山方舟 DeepSeek-V4-Flash 正式版（已开通，剩约 240 万 / 共 250 万免费 tokens）。
+  # 比豆包快 2-6 秒，但会念出内部思考、德语提问用中文回答，所以没选它。
+  ArkLLM:
+    type: openai
+    model_name: deepseek-v4-flash-ga-260731
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key: ""
+    max_tokens: 160
+  # 当前在用：火山方舟豆包 lite（已开通，50 万免费 tokens，与 DeepSeek 的额度互相独立）。
+  # 比 DeepSeek 慢 2-6 秒，但严格守语言规则、不念内部思考，所以选它。
+  DoubaoLLM:
+    type: openai
+    model_name: doubao-seed-2-0-lite-260428
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key: ""
+    max_tokens: 160
+  # 备用：你已有的 DeepSeek Key，改 selected_module.LLM 即可切回
+  DeepSeekLLM:
+    type: openai
+    model_name: deepseek-v4-flash
+    url: https://api.deepseek.com
+    api_key: ""
+    max_tokens: 160
+
+  # 开发机专用：复用本机已登录的 Claude Code 账户（OAuth 订阅登录，无需 API Key）。
+  # 不适合公司部署——绑定个人账号、需要装 Claude Code CLI。保留是为了对照测试。
+  # 每连接一个常驻 claude 进程，握手期由 _warmup_llm() 预热一轮。
+  # 实测热轮首字 1.8-2.0 秒。不支持工具调用，见 provider 文件头注释。
+  ClaudeCLI:
+    type: claudecli
+    model_name: claude-haiku-4-5
+    read_timeout: 25
+    # cli_path 由 launchers/start_server.py 按 which claude 注入；只有要指定别的二进制时才在这里写。
+
+TTS:
+  EdgeTTS:
+    type: edge
+    # 默认音色（认不出语言时用）。德语顾客占多数，所以默认留德语。
+    voice: de-DE-SeraphinaMultilingualNeural
+    # 按顾客这一句的语言换音色。多语音色能读别的语言但读不好：
+    # 同一句中文，德语 Seraphina 要 10.85 秒，中文晓晓只要 9.05 秒，慢 20%，听感含糊。
+    voices:
+      zh: zh-CN-XiaoxiaoNeural
+      de: de-DE-SeraphinaMultilingualNeural
+      en: en-US-AvaMultilingualNeural
+    # 句内按语言切段：德语句里的中文菜名用中文音色念，中文句里的德语菜名用德语音色念。
+    # 2026-09-23 开启供实机测试。代价：被切开的句子首包缓存冷时多 0.7-2.1 秒。
+    # 关掉改成 false 并重启即可回到整句一个音色。
+    split_languages: true
+    # 首包优化（edge_stream_decode / first_sentence_local / first_sentence_models /
+    # first_sentence_vocoder）由 launchers/start_server.py 注入，要关闭或换模型改那边。
+    output_dir: tmp/
+  # 火山双向流式：边生成边播，首包可压到 1 秒内；EdgeTTS 要整句合成完才返回，所以首包要等好几秒。
+  # 用它需要先在控制台建应用并开通「语音合成大模型」：
+  #   https://console.volcengine.com/speech/service/10007
+  # appid 和 access_token 是语音服务自己的凭据（和方舟 API Key 无关），
+  # 存进钥匙串 smartfoodie-xiaozhi-server 的 SPEECH_APPID / SPEECH_ACCESS_TOKEN，
+  # 由 start_server.py 注入内存，不写在本文件里。
+  # 注意：部分外语音色仅支持单向流，双向流调用会直接报错，选音色时要避开。
+  HuoshanDoubleStreamTTS:
+    type: huoshan_double_stream
+    ws_url: wss://openspeech.bytedance.com/api/v3/tts/bidirection
+    appid: ""
+    access_token: ""
+    resource_id: volc.service_type.10029
+    speaker: zh_female_wanwanxiaohe_moon_bigtts
+    enable_ws_reuse: True
+
+# 只保留 MCP 工具：关掉联网搜索、天气、新闻、音乐等插件，
+# 它们会把「41号机器」这类问题带偏成联网搜索。MCP 工具由服务端自动注入，不写在这里。
+Intent:
+  function_call:
+    type: function_call
+    functions: []
+
+# 换掉服务端自带的 agent-base-prompt.txt：它强制「不论用户说什么语言都用配置语言回答」，
+# 会把德语、英语提问统统答成中文。
+prompt_template: agent-smartfoodie-prompt.txt
+
+prompt: |
+  你是 Smartfoodie 的语音助手，负责 041 号售货机的实时库存问答。
+  回答简短口语化，一般不超过三句话，不要用列表、表情符号或 Markdown。
+  涉及 041 号机器的库存、缺货、过期商品或最近补货，一律调用库存工具，不要凭记忆回答。
+
+# 握手期把 041 库存预取进提示词的 dynamic_context，省掉每轮"大模型判断该不该调工具"
+# 那次往返（约 2 秒）。桥侧 30 秒缓存，上游异常时返回非 0，服务端会跳过注入、
+# 模型照旧走工具调用，不会把错误文本当库存念出去。
+context_providers:
+  - url: "http://127.0.0.1:8766/context"

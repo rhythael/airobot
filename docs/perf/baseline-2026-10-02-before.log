@@ -1,0 +1,48 @@
+### run1 | 41号机器现在有什么吃的？
+[ 0.02s] 识别: 41号机器现在有什么吃的？
+[ 3.41s] 播报: 现在有2种可以买
+[ 4.90s] 播报: 素炒面2份在2-5货道，Geschmorte Rindfleischnudeln (ohne 
+[ 9.94s] 播报: Suppe)1份在2-7货道
+结果: 首包音频 3.64s, 音频帧 155 个（约 9.3s）, 句子 3
+### run1 | Was gibt es gerade am Automaten 41?
+[ 0.02s] 识别: Was gibt es gerade am Automaten 41?
+[ 4.08s] 播报: Es gibt zwei Gerichte:素炒面 und Geschmorte Rindfleischnudeln 
+[ 8.61s] 播报: (ohne Suppe)
+结果: 首包音频 4.08s, 音频帧 103 个（约 6.2s）, 句子 2
+### run1 | What can I buy at machine 41 right now?
+[ 0.01s] 识别: What can I buy at machine 41 right now?
+[ 3.75s] 播报: Two kinds are available right now
+[ 6.05s] 播报: We have素炒面 in slot 2-5 and Geschmorte Rindfleischnudeln 
+[12.05s] 播报: (ohne Suppe) in slot 2-7
+结果: 首包音频 3.89s, 音频帧 186 个（约 11.2s）, 句子 3
+### run2 | 41号机器现在有什么吃的？
+[ 0.00s] 识别: 41号机器现在有什么吃的？
+[ 2.01s] 播报: 现在有两种可以买
+[ 4.69s] 播报: 素炒面两份，Geschmorte Rindfleischnudeln (ohne Suppe)一份
+结果: 首包音频 2.14s, 音频帧 113 个（约 6.8s）, 句子 2
+### run2 | Was gibt es gerade am Automaten 41?
+[ 0.02s] 识别: Was gibt es gerade am Automaten 41?
+[ 2.71s] 播报: Es gibt zwei Gerichte:素炒面 und Geschmorte Rindfleischnudeln 
+[ 7.22s] 播报: (ohne Suppe)
+结果: 首包音频 2.71s, 音频帧 103 个（约 6.2s）, 句子 2
+### run2 | What can I buy at machine 41 right now?
+[ 0.00s] 识别: What can I buy at machine 41 right now?
+[ 2.34s] 播报: Two items are available
+[ 4.34s] 播报: Stir-fried noodles in slot 2-5, and Geschmorte 
+[ 7.93s] 播报: Rindfleischnudeln in slot 2-7
+结果: 首包音频 2.61s, 音频帧 134 个（约 8.0s）, 句子 3
+### run3 | 41号机器现在有什么吃的？
+[ 0.02s] 识别: 41号机器现在有什么吃的？
+[ 3.25s] 播报: 现在有两种
+[ 4.31s] 播报: 素炒面两份在二货道五，Geschmorte Rindfleischnudeln (ohne Suppe)一份在二货道七
+结果: 首包音频 3.40s, 音频帧 140 个（约 8.4s）, 句子 2
+### run3 | Was gibt es gerade am Automaten 41?
+[ 0.01s] 识别: Was gibt es gerade am Automaten 41?
+[ 2.48s] 播报: Es gibt zwei Gerichte:素炒面 und Geschmorte Rindfleischnudeln 
+[ 6.99s] 播报: (ohne Suppe)
+结果: 首包音频 2.48s, 音频帧 103 个（约 6.2s）, 句子 2
+### run3 | What can I buy at machine 41 right now?
+[ 0.02s] 识别: What can I buy at machine 41 right now?
+[ 1.80s] 播报: Two items are available
+[ 3.29s] 播报: Fried noodles and braised beef noodles
+结果: 首包音频 1.92s, 音频帧 75 个（约 4.5s）, 句子 2

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 让 Mac 在公司网络上始终持有 192.168.0.201（041 售货机找服务端用的地址）。见同目录 README.md -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.smartfoodie.airobot-ota-alias</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/usr/local/libexec/airobot-ota-alias.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- 每 30 秒一次；网络变化（DNS 配置改写）时也立刻跑一次 -->
+    <key>StartInterval</key>
+    <integer>30</integer>
+    <key>WatchPaths</key>
+    <array>
+        <string>/var/run/resolv.conf</string>
+        <string>/Library/Preferences/SystemConfiguration</string>
+    </array>
+    <key>StandardErrorPath</key>
+    <string>/var/log/airobot-ota-alias.log</string>
+</dict>
+</plist>

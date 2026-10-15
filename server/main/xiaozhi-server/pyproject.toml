@@ -1,0 +1,14 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# tests_smartfoodie 此前不在 testpaths 里，裸跑 pytest 会 0 失败通过
+# 但一个 SmartFoodie 测试都不跑——假绿灯。P-1 修正。
+testpaths = ["tests", "tests_smartfoodie"]
+# 让 test_chain_recovery.py 不必再靠 PYTHONPATH=. 才能 import core
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

@@ -1,0 +1,2218 @@
+diff --git a/config/logger.py b/config/logger.py
+index 668e0cd7..1229be60 100644
+--- a/config/logger.py
++++ b/config/logger.py
+@@ -46,6 +46,11 @@ def formatter(record):
+     return record["message"]
+ 
+ 
++def log_file_name(log_config):
++    """日志文件名。环境变量 XIAOZHI_LOG_FILE 优先：pytest 用它把测试日志和线上 server.log 分开。"""
++    return os.environ.get("XIAOZHI_LOG_FILE") or log_config.get("log_file", "server.log")
++
++
+ def setup_logging(config=None):
+     """从配置文件中读取日志配置，并设置日志输出格式和级别"""
+     if config is None:
+@@ -80,7 +85,7 @@ def setup_logging(config=None):
+ 
+         log_level = log_config.get("log_level", "INFO")
+         log_dir = log_config.get("log_dir", "tmp")
+-        log_file = log_config.get("log_file", "server.log")
++        log_file = log_file_name(log_config)
+         data_dir = log_config.get("data_dir", "data")
+ 
+         os.makedirs(log_dir, exist_ok=True)
+diff --git a/core/connection.py b/core/connection.py
+index 718f3909..48b915cd 100644
+--- a/core/connection.py
++++ b/core/connection.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import os
+ import sys
+ import copy
+@@ -377,8 +379,39 @@ class ConnectionHandler:
+             # 入口处直接解码PCM，避免VAD和ASR重复解码
+             pcm_frame = self._decode_opus_packet(message)
+             if pcm_frame:
++                if self.config.get("audio_stream_capture_dir"):
++                    self._capture_stream(pcm_frame)
+                 self.asr_audio_queue.put(pcm_frame)
+ 
++    def _capture_stream(self, pcm_frame):
++        """诊断用：把设备传来的每个音频包连续写进一个 wav，并记下每个包的到达时间。
++        用来判断句首丢失是设备没传，还是服务端没接住。会录下说话人的声音，测完删。"""
++        try:
++            import wave as _wave
++            if getattr(self, "_stream_wav", None) is None:
++                d = self.config["audio_stream_capture_dir"]
++                os.makedirs(d, exist_ok=True)
++                base = os.path.join(d, f"stream-{time.strftime('%Y%m%d-%H%M%S')}")
++                self._stream_wav = _wave.open(base + ".wav", "wb")
++                self._stream_wav.setnchannels(1)
++                self._stream_wav.setsampwidth(2)
++                self._stream_wav.setframerate(16000)
++                self._stream_log = open(base + ".events", "a", buffering=1)
++                self._stream_samples = 0
++            self._stream_log.write(f"{time.time():.3f} packet {self._stream_samples} {len(pcm_frame)}\n")
++            self._stream_wav.writeframes(pcm_frame)
++            self._stream_samples += len(pcm_frame) // 2
++        except Exception as e:
++            self.logger.bind(tag=TAG).warning(f"音频流采集失败: {e}")
++
++    def _stream_event(self, name, detail=""):
++        log = getattr(self, "_stream_log", None)
++        if log:
++            try:
++                log.write(f"{time.time():.3f} {name} {detail}\n")
++            except Exception:
++                pass
++
+     async def _process_mqtt_audio_message(self, message):
+         """
+         处理来自MQTT网关的音频消息，解析16字节头部并提取音频数据，在入队前进行AEC处理
+@@ -649,23 +682,54 @@ class ConnectionHandler:
+             self._init_prompt_enhancement()
+             """注入工具调用few-shot示例（仅function_call模式）"""
+             self._inject_tool_call_fewshot()
++            """预热 LLM（仅对实现了 warmup 的 provider 生效，如 claudecli）"""
++            self._warmup_llm()
+ 
+         except Exception as e:
+             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+ 
++    def _warmup_llm(self):
++        """握手期预热 LLM。只对实现了 warmup() 的 provider 生效。
++        跑在 _initialize_components 的线程池里，不占用户时间。"""
++        llm = getattr(self, "llm", None)
++        if llm is None or not hasattr(llm, "warmup"):
++            return
++        try:
++            llm.warmup(self.session_id, getattr(self, "prompt", "") or "")
++        except Exception as e:
++            self.logger.bind(tag=TAG).warning(f"LLM 预热失败: {e}")
++        # 预热跑在线程池里，短连接（仿真器、重连风暴）可能在它完成前就 close() 了：
++        # close_session 先执行、随后 warmup 才把新进程塞进 _sessions，没人再回收。
++        # 预热结束后发现连接已停，就再收一次。
++        if self.stop_event.is_set() and hasattr(llm, "close_session"):
++            try:
++                llm.close_session(self.session_id)
++            except Exception:
++                pass
++
+     def _init_prompt_enhancement(self):
+ 
+-        # 更新上下文信息
+-        self.prompt_manager.update_context_info(self, self.client_ip)
+-        enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
+-            self.config["prompt"],
+-            self.device_id,
+-            self.client_ip,
+-            emoji_enabled=(self.features or {}).get("emoji", True),
+-        )
+-        if enhanced_prompt:
+-            self.change_system_prompt(enhanced_prompt)
+-            self.logger.bind(tag=TAG).debug("系统提示词已增强更新")
++        if self.config.get("turn_context_refresh") and self.config.get("context_providers"):
++            if self.config.get("local_menu_knowledge"):
++                # Local menu queries require no inventory fetch, even at handshake.
++                # Inventory questions refresh at chat entry instead.
++                return
++            from core.utils.turn_context import refresh_turn_context
++            refresh_turn_context(self)
++            return
++
++        with self.prompt_manager.context_lock:
++            # 更新上下文信息
++            self.prompt_manager.update_context_info(self, self.client_ip)
++            enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
++                self.config["prompt"],
++                self.device_id,
++                self.client_ip,
++                emoji_enabled=(self.features or {}).get("emoji", True),
++            )
++            if enhanced_prompt:
++                self.change_system_prompt(enhanced_prompt)
++                self.logger.bind(tag=TAG).debug("系统提示词已增强更新")
+ 
+     def _inject_tool_call_fewshot(self):
+         """注入工具调用 few-shot 示例到对话历史。
+@@ -772,13 +836,17 @@ class ConnectionHandler:
+         """为当前连接初始化声纹识别"""
+         try:
+             voiceprint_config = self.config.get("voiceprint", {})
+-            if voiceprint_config:
++            # 判 url 而不是判 dict 非空。配置里 voiceprint 段存在但 url 为空时，
++            # 旧写法每次连接都记一条 WARNING「声纹识别功能启用但配置不完整」——
++            # 这句话是错的（声纹从未启用），会让人以为存在一个开着但配坏了的
++            # 生物识别入口，实际 provider 是 None。041 一周被它刷了 275 条。
++            if voiceprint_config and voiceprint_config.get("url"):
+                 voiceprint_provider = VoiceprintProvider(voiceprint_config)
+                 if voiceprint_provider is not None and voiceprint_provider.enabled:
+                     self.voiceprint_provider = voiceprint_provider
+                     self.logger.bind(tag=TAG).info("声纹识别功能已在连接时动态启用")
+                 else:
+-                    self.logger.bind(tag=TAG).warning("声纹识别功能启用但配置不完整")
++                    self.logger.bind(tag=TAG).warning("声纹识别已配置 url 但初始化失败")
+             else:
+                 self.logger.bind(tag=TAG).info("声纹识别功能未启用")
+         except Exception as e:
+@@ -1051,15 +1119,58 @@ class ConnectionHandler:
+ 
+     def chat(self, query, depth=0):
+         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
+-        current_sentence_id = None
++        current_sentence_id = str(uuid.uuid4().hex) if depth == 0 else self.sentence_id
++        if depth == 0:
++            self.sentence_id = current_sentence_id
++            # 把计时和本轮句子绑定：发送端只在这个 sentence_id 的首帧上收口，旧轮残帧不算
++            from core.utils import turn_timing as _tt
++            _tt.set_field(self, "sentence_id", current_sentence_id)
++
++        def active_turn():
++            return not getattr(self, "client_abort", False) and self.sentence_id == current_sentence_id
++
++        def fail_turn():
++            if not active_turn():
++                return
++            answer = get_system_error_response(self.config)
++            self.tts.tts_text_queue.put(TTSMessageDTO(
++                sentence_id=current_sentence_id, sentence_type=SentenceType.MIDDLE,
++                content_type=ContentType.TEXT, content_detail=answer))
++            self.dialogue.put(Message(role="assistant", content=answer))
++            if depth == 0:
++                self.tts.tts_text_queue.put(TTSMessageDTO(
++                    sentence_id=current_sentence_id, sentence_type=SentenceType.LAST,
++                    content_type=ContentType.ACTION))
+ 
+         if query is not None:
+             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
+ 
+-        # 为最顶层时新建会话ID和发送FIRST请求
++        # 这些导入放在函数内：tests_smartfoodie 会把 chat 的源码单独 exec 并对
++        # core.utils.turn_context.refresh_turn_context 打补丁，提到模块顶部补丁就打不到了。
++        from core.utils.turn_context import refresh_turn_context, filter_turn_tools, speak_local_answer
++        from core.utils.local_answers import route as local_answer_route
++        from core.utils import turn_timing
++        if depth == 0 and query is not None and not (getattr(self, "turn_timing", None) or {}).get("lang"):
++            # ASR 路径会把识别出的语种先写进计时字段；文本直达等没有语种的入口才在这里猜
++            from core.providers.tts.local_first_sentence import guess_language
++            turn_timing.set_field(self, "lang", guess_language(query, "en"))
++        turn_context_managed = False
++        menu_answer = None
++        lookup_query = query
++        if depth == 0 and query is not None:
++            from core.utils.menu_knowledge import local_menu_turn, resolve_stock_followup
++            lookup_query = resolve_stock_followup(self, query, self.config.get("local_menu_knowledge"))
++            menu_answer = local_menu_turn(
++                self, lookup_query, self.config.get("local_menu_knowledge"),
++            )
++            if menu_answer is None:
++                turn_context_managed = refresh_turn_context(self)
++
++        if not active_turn():
++            return None
++
++        # 为最顶层发送FIRST请求
+         if depth == 0:
+-            current_sentence_id = str(uuid.uuid4().hex)
+-            self.sentence_id = current_sentence_id  # 更新共享属性
+             self.dialogue.put(Message(role="user", content=query))
+             self.tts.tts_text_queue.put(
+                 TTSMessageDTO(
+@@ -1072,6 +1183,28 @@ class ConnectionHandler:
+             # 递归调用时，使用当前的sentence_id
+             current_sentence_id = self.sentence_id
+ 
++        if menu_answer is not None:
++            turn_timing.set_field(self, "route", "local")
++            speak_local_answer(self, menu_answer, current_sentence_id)
++            self.logger.bind(tag=TAG).info("已直接回答本地菜品资料问题，未请求库存API或LLM")
++            return True
++
++        if turn_context_managed:
++            # 数量 / 具体商品 / 四类模板问法按序试一遍本地直答，省掉 LLM 首字那 0.7–1.3 秒；
++            # 都没命中或库存不可用返回 None，照旧走模型。
++            # FIRST 消息已经入队，这里再抛异常整轮就静默挂死（设备收到 tts start 等不到 stop），
++            # 而 executor 里的 Future 没人消费、异常不会进日志。直答出错一律退回模型。
++            try:
++                answer = local_answer_route(self, query, lookup_query)
++            except Exception:
++                self.logger.bind(tag=TAG).exception("本地直答出错，改走模型")
++                answer = None
++            if answer is not None:
++                turn_timing.set_field(self, "route", "local")
++                speak_local_answer(self, answer, current_sentence_id)
++                self.logger.bind(tag=TAG).info("已直接回答实时库存问题")
++                return True
++
+         # 设置最大递归深度，避免无限循环，可根据实际需求调整
+         MAX_DEPTH = 5
+         force_final_answer = False  # 标记是否强制最终回答
+@@ -1094,10 +1227,36 @@ class ConnectionHandler:
+         # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
+         if (
+                 self.intent_type == "function_call"
+-                and hasattr(self, "func_handler")
++                and self.func_handler is not None
+                 and not force_final_answer
+         ):
++            # 工具在后台线程里初始化，MCP 要两秒左右。设备握手后立刻说话时，这里会赶在
++            # 工具就绪之前，本轮请求就不带任何工具，模型只能回答"我没有这个工具"。
++            #
++            # 但握手期若已把库存快照注入系统提示词，模型不靠工具也能答，就不必干等：
++            # 桥挂掉时 MCP 初始化会耗满自己那 10 秒超时，再叠加这里 5 秒，用户要听
++            # 近二十秒的静默。有快照就直接放行，没有才等——那个竞态仍然要守。
++            #
++            # 注意这里和桥是隐性耦合：判断串取自 /context 返回的键名（machine_mcp_server.py
++            # 的 "041号机器库存快照"）。改了那边的键名，这里会静默退回白等 5 秒。
++            has_snapshot = "库存快照" in (self.prompt or "")
++            if not has_snapshot and not turn_context_managed:
++                deadline = time.time() + 5
++                while not self.func_handler.finish_init and time.time() < deadline:
++                    time.sleep(0.1)
++            if not self.func_handler.finish_init:
++                self.logger.bind(tag=TAG).warning(
++                    "工具尚未就绪，本轮不带工具调用"
++                    + ("（上下文已有库存快照，未等待）" if has_snapshot else "")
++                )
+             functions = list(self.func_handler.get_functions())
++            if turn_context_managed:
++                functions = filter_turn_tools(functions, self.config["turn_context_refresh"])
++                if not functions:
++                    # 库存已随提示词注入、没有别的工具可调：按纯文本对话走，不塞 direct_answer
++                    # 虚拟工具。OpenAI 兼容模型见到它就会用，回答先裹一层 JSON（首字更慢），
++                    # 再走流式提取（2026-10-09 交付验证）。ClaudeCLI 本来就不支持工具，无影响。
++                    functions = None
+             # 仅在第一层调用时注入 direct_answer 虚拟工具
+             # 递归调用（depth>0）不注入，避免模型在生成文本回复时再次调 direct_answer 导致循环
+             if functions is not None and depth == 0:
+@@ -1123,24 +1282,30 @@ class ConnectionHandler:
+                 self.system_introduced_speakers.add(cs)
+                 speaker_for_system = cs
+ 
++            llm_dialogue = self.dialogue.get_llm_dialogue_with_memory(
++                memory_str, self.config.get("voiceprint", {}), speaker_for_system
++            )
++            # SmartFoodie：回答语言、指代背景、每轮规则对所有大模型一视同仁。
++            # 自带整形的 provider（ClaudeCLI 常驻进程）标了 shapes_turns，这里不重复做。
++            if (self.config.get("local_menu_knowledge") and self.config.get("turn_shaping", True)
++                    and not getattr(self.llm, "shapes_turns", False)):
++                from core.utils.turn_shaping import shape_dialogue
++                if not hasattr(self, "turn_shaping_state"):
++                    self.turn_shaping_state = {}
++                llm_dialogue = shape_dialogue(
++                    llm_dialogue, self.turn_shaping_state, self.config.get("local_menu_knowledge")
++                )
++
+             if self.intent_type == "function_call" and functions is not None:
+                 # 使用支持functions的streaming接口
+                 llm_responses = self.llm.response_with_functions(
+-                    self.session_id,
+-                    self.dialogue.get_llm_dialogue_with_memory(
+-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
+-                    ),
+-                    functions=functions,
++                    self.session_id, llm_dialogue, functions=functions,
+                 )
+             else:
+-                llm_responses = self.llm.response(
+-                    self.session_id,
+-                    self.dialogue.get_llm_dialogue_with_memory(
+-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
+-                    ),
+-                )
++                llm_responses = self.llm.response(self.session_id, llm_dialogue)
+         except Exception as e:
+             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
++            fail_turn()
+             return None
+ 
+         # 处理流式响应
+@@ -1151,8 +1316,8 @@ class ConnectionHandler:
+         emotion_flag = True
+         try:
+             for response in llm_responses:
+-                if self.client_abort:
+-                    break
++                if not active_turn():
++                    return None
+                 if self.intent_type == "function_call" and functions is not None:
+                     content, tools_call = response
+                     if "content" in response:
+@@ -1205,6 +1370,8 @@ class ConnectionHandler:
+                     emotion_flag = False
+ 
+                 if content is not None and len(content) > 0:
++                    turn_timing.mark(self, "llm_first")
++                    turn_timing.set_field(self, "route", "llm")
+                     if not tool_call_flag:
+                         response_message.append(content)
+                         self.tts.tts_text_queue.put(
+@@ -1217,23 +1384,10 @@ class ConnectionHandler:
+                         )
+         except Exception as e:
+             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
+-            self.tts.tts_text_queue.put(
+-                TTSMessageDTO(
+-                    sentence_id=current_sentence_id,
+-                    sentence_type=SentenceType.MIDDLE,
+-                    content_type=ContentType.TEXT,
+-                    content_detail=get_system_error_response(self.config),
+-                )
+-            )
+-            if depth == 0:
+-                self.tts.tts_text_queue.put(
+-                    TTSMessageDTO(
+-                        sentence_id=current_sentence_id,
+-                        sentence_type=SentenceType.LAST,
+-                        content_type=ContentType.ACTION,
+-                    )
+-                )
+-            return
++            fail_turn()
++            return None
++        if not active_turn():
++            return None
+         # 处理function call
+         if tool_call_flag:
+             bHasError = False
+@@ -1365,9 +1519,15 @@ class ConnectionHandler:
+                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(e), report_tool_call=False)
+ 
+                 # 统一处理工具调用结果
+-                if tool_results:
++                if tool_results and active_turn():
+                     self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
+ 
++        if not active_turn():
++            return None
++        if not response_message and not tool_call_flag:
++            fail_turn()
++            return None
++
+         # 存储对话内容
+         if len(response_message) > 0:
+             text_buff = "".join(response_message)
+@@ -1591,6 +1751,20 @@ class ConnectionHandler:
+                         f"清理工具处理器时出错: {cleanup_error}"
+                     )
+ 
++            # 回收 LLM 的常驻子进程。claudecli 每条连接 Popen 一个 claude 进程，
++            # 此前这里从不回收，只靠 provider 内 600 秒的惰性回收兜底；
++            # 而那个回收只在 _get_session 里顺带触发，没有新连接时永远不跑。
++            # 实测：0 条连接时仍挂着 3 个子进程共 194MB，其中一个空闲 700 秒仍存活。
++            # 用 hasattr 守卫，其他 provider（openai/豆包等）没有这个方法，一行都不会跑到。
++            llm = getattr(self, "llm", None)
++            if llm is not None and hasattr(llm, "close_session"):
++                try:
++                    llm.close_session(self.session_id)
++                except Exception as llm_error:
++                    self.logger.bind(tag=TAG).error(
++                        f"关闭 LLM 会话时出错: {llm_error}"
++                    )
++
+             # 触发停止事件
+             if self.stop_event:
+                 self.stop_event.set()
+@@ -1806,6 +1980,9 @@ class ConnectionHandler:
+         """
+         if not text:
+             return text
++        # 流式增量会逐段经过这里：「gibt 」的尾空格是词与词之间唯一的空格，不能被末尾的 rstrip 吃掉
++        # （2026-10-09 交付验证：德语、英语回答念成「gibtkeinesüßenWaren」）。只有真的去掉了闭合符号才丢尾空白。
++        trailing = text[len(text.rstrip()):]
+         # 清理独立一行的 JSON 闭合垃圾（如 ）"}}  '}}  "}}  }}  } ）
+         _garbage_chars = frozenset('")\'}）')
+         lines = text.split('\n')
+@@ -1817,8 +1994,12 @@ class ConnectionHandler:
+             cleaned.append(line)
+         result = '\n'.join(cleaned)
+         # 清理末尾残留的 JSON 闭合符号
+-        result = re.sub(r'["\'}\]]+$', '', result.rstrip()).rstrip()
+-        return result
++        garbage_lines_removed = len(cleaned) != len(lines)
++        stripped = result.rstrip()
++        no_tail = re.sub(r'["\'}\]]+$', '', stripped)
++        if garbage_lines_removed or no_tail != stripped:
++            return no_tail.rstrip()
++        return no_tail + trailing
+ 
+     def _merge_tool_calls(self, tool_calls_list, tools_call):
+         """合并工具调用列表
+diff --git a/core/handle/abortHandle.py b/core/handle/abortHandle.py
+index c4a2fa88..c616b332 100644
+--- a/core/handle/abortHandle.py
++++ b/core/handle/abortHandle.py
+@@ -1,4 +1,7 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import json
++import uuid
+ from typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+@@ -11,6 +14,11 @@ async def handleAbortMessage(conn: "ConnectionHandler"):
+     # 设置成打断状态，会自动打断llm、tts任务
+     conn.close_after_chat = False
+     conn.client_abort = True
++    # Invalidate blocked streams even when the next turn clears client_abort.
++    conn.sentence_id = uuid.uuid4().hex
++    # 这一轮没说完就被打断，它的计时作废：否则下一段非对话音频（提示音、唤醒应答）
++    # 的第一帧会用这个旧零点打出一行离谱的 TURN
++    conn.turn_timing = None
+     conn.clear_queues()
+     # 打断客户端说话状态
+     await conn.websocket.send(
+diff --git a/core/handle/helloHandle.py b/core/handle/helloHandle.py
+index 3f4a11e3..a75a16c8 100644
+--- a/core/handle/helloHandle.py
++++ b/core/handle/helloHandle.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import time
+ import json
+ import uuid
+@@ -47,6 +49,28 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
+         conn.logger.bind(tag=TAG).debug(f"客户端音频格式: {format}")
+         conn.audio_format = format
+         conn.welcome_msg["audio_params"] = audio_params
++
++        # 采用设备声明的采样率。此前 conn.sample_rate 在建连时就按服务端配置
++        # 定成 24000，而 hello 是之后才到的，从不回写——设备声明 16000 时，
++        # 服务端按 24kHz 编 opus、设备按 16kHz 解，播放会慢 1.5 倍且音调偏低，
++        # 三种语言听起来都含糊。
++        device_rate = audio_params.get("sample_rate")
++        if device_rate and int(device_rate) != conn.sample_rate:
++            old_rate = conn.sample_rate
++            conn.sample_rate = int(device_rate)
++            conn.logger.bind(tag=TAG).info(
++                f"按设备声明调整输出采样率: {old_rate} -> {conn.sample_rate}"
++            )
++            # 编码器已在握手期按旧采样率建好，必须重建，否则回写无效。
++            tts = getattr(conn, "tts", None)
++            if tts is not None and getattr(tts, "opus_encoder", None) is not None:
++                try:
++                    from core.utils import opus_encoder_utils
++                    tts.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
++                        sample_rate=conn.sample_rate, channels=1, frame_size_ms=60
++                    )
++                except Exception as e:
++                    conn.logger.bind(tag=TAG).error(f"重建 opus 编码器失败: {e}")
+     features = msg_json.get("features")
+     if features:
+         conn.logger.bind(tag=TAG).debug(f"客户端特性: {features}")
+diff --git a/core/handle/receiveAudioHandle.py b/core/handle/receiveAudioHandle.py
+index 504669b8..a6944c36 100644
+--- a/core/handle/receiveAudioHandle.py
++++ b/core/handle/receiveAudioHandle.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import time
+ import json
+ import asyncio
+@@ -10,13 +12,17 @@ from core.handle.abortHandle import handleAbortMessage
+ from core.handle.intentHandler import handle_user_intent
+ from core.utils.output_counter import check_device_output_limit
+ from core.handle.sendAudioHandle import send_stt_message, SentenceType
++from core.utils import turn_timing
+ 
+ TAG = __name__
+ 
+ 
+ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
+     # 当前片段是否有人说话
++    was_voice = conn.client_have_voice
+     have_voice = conn.vad.is_vad(conn, pcm_frame)
++    if conn.client_have_voice and not was_voice:
++        conn._stream_event("vad_start", f"buffered_frames={len(conn.asr_audio)}")
+     # 如果设备刚刚被唤醒，短暂忽略VAD检测
+     if hasattr(conn, "just_woken_up") and conn.just_woken_up:
+         have_voice = False
+@@ -85,7 +91,27 @@ async def startToChat(conn: "ConnectionHandler", text):
+ 
+     # manual 模式下不打断正在播放的内容
+     if conn.client_is_speaking and conn.client_listen_mode != "manual":
++        # 抢话：abort 会把计时置空，但这次 abort 是为了给**本轮**让路，本轮的零点
++        # （handle_voice_stop 刚建的）要留下来，否则打断轮次永远没有 TURN 行。
++        timing = getattr(conn, "turn_timing", None)
+         await handleAbortMessage(conn)
++        if timing and not timing.get("emitted"):
++            conn.turn_timing = timing
++    # 流式 ASR provider 不经过 handle_voice_stop，没有零点就在这里补一个（非流式路径已建，不覆盖）
++    if not getattr(conn, "turn_timing", None) or conn.turn_timing.get("emitted"):
++        turn_timing.start_turn(conn)
++
++    # 听力测试模式：不走意图和大模型，直接把听到的内容念回来，
++    # 测试的人当场就知道机器听成了什么。
++    if conn.config.get("asr_listen_test"):
++        import uuid
++        from core.handle.intentHandler import speak_txt
++
++        await send_stt_message(conn, actual_text)
++        conn.client_abort = False
++        conn.sentence_id = uuid.uuid4().hex
++        speak_txt(conn, actual_text.strip() or "没听清")
++        return
+ 
+     # 首先进行意图分析，使用实际文本内容
+     intent_handled = await handle_user_intent(conn, actual_text)
+diff --git a/core/handle/sendAudioHandle.py b/core/handle/sendAudioHandle.py
+index 509938c3..42208fef 100644
+--- a/core/handle/sendAudioHandle.py
++++ b/core/handle/sendAudioHandle.py
+@@ -10,6 +10,7 @@ from core.utils import textUtils
+ from core.utils.util import audio_to_data
+ from core.providers.tts.dto.dto import SentenceType
+ from core.utils.audioRateController import AudioRateController
++from core.utils import turn_timing
+ 
+ TAG = __name__
+ # 音频帧时长（毫秒）
+@@ -26,6 +27,8 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
+     if conn.tts.tts_audio_first_sentence:
+         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
+         conn.tts.tts_audio_first_sentence = False
++        # 首句音频合成完毕、准备下发的时刻
++        turn_timing.mark(conn, "tts_first")
+ 
+     if sentenceType == SentenceType.FIRST:
+         # 同一句子的后续消息加入流控队列，其他情况立即发送
+@@ -276,6 +279,13 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
+         # 直接发送opus数据包
+         await conn.websocket.send(opus_packet)
+ 
++    # 本轮第一帧音频真正离开服务端：计时收口，打出 TURN 行（两者都幂等，后续帧是空操作）。
++    # 只认本轮的句子：抢话时上一轮尚在节奏发送的旧帧会撞上新零点，打出一行全是 - 的假 TURN。
++    timing = getattr(conn, "turn_timing", None)
++    if timing and timing.get("sentence_id") in (None, flow_control.get("sentence_id")) and timing.get("route"):
++        turn_timing.mark(conn, "first_audio")
++        turn_timing.emit(conn, conn.logger)
++
+     # 更新流控状态
+     flow_control["packet_count"] = packet_index + 1
+     flow_control["sequence"] = sequence + 1
+diff --git a/core/handle/textHandler/listenMessageHandler.py b/core/handle/textHandler/listenMessageHandler.py
+index 545ccec4..115dce9d 100644
+--- a/core/handle/textHandler/listenMessageHandler.py
++++ b/core/handle/textHandler/listenMessageHandler.py
+@@ -14,6 +14,7 @@ from core.handle.sendAudioHandle import send_stt_message, send_tts_message
+ from core.handle.textMessageHandler import TextMessageHandler
+ from core.handle.textMessageType import TextMessageType
+ from core.utils.util import remove_punctuation_and_length
++from core.utils import turn_timing
+ from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
+ 
+ 
+@@ -58,6 +59,9 @@ class ListenTextMessageHandler(TextMessageHandler):
+             if "text" in msg_json:
+                 conn.last_activity_time = time.time() * 1000
+                 original_text = msg_json["text"]  # 保留原始文本
++                # 文本直达没有识别阶段：零点就是现在，asr 记 0
++                turn_timing.start_turn(conn)
++                turn_timing.mark(conn, "asr")
+                 filtered_len, filtered_text = remove_punctuation_and_length(
+                     original_text
+                 )
+diff --git a/core/handle/textMessageProcessor.py b/core/handle/textMessageProcessor.py
+index a31ec5cf..c31a4823 100644
+--- a/core/handle/textMessageProcessor.py
++++ b/core/handle/textMessageProcessor.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import json
+ from typing import TYPE_CHECKING
+ 
+@@ -26,6 +28,8 @@ class TextMessageProcessor:
+ 
+                 # 记录日志
+                 conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
++                if message_type in ("listen", "abort") and hasattr(conn, "_stream_event"):
++                    conn._stream_event(message_type, msg_json.get("state", ""))
+ 
+                 # 获取并执行处理器
+                 handler = self.registry.get_handler(message_type)
+diff --git a/core/providers/asr/base.py b/core/providers/asr/base.py
+index dcfaf3a7..29af0f00 100644
+--- a/core/providers/asr/base.py
++++ b/core/providers/asr/base.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import os
+ import io
+ import wave
+@@ -13,6 +15,8 @@ import threading
+ 
+ from abc import ABC, abstractmethod
+ from config.logger import setup_logging
++from core.utils.slot_numbers import normalize_slot_numbers
++from core.utils import turn_timing
+ from core.providers.asr.dto.dto import InterfaceType
+ from core.handle.receiveAudioHandle import startToChat
+ from core.handle.reportHandle import enqueue_asr_report
+@@ -75,6 +79,7 @@ class ASRProviderBase(ABC):
+             if conn.asr.interface_type != InterfaceType.STREAM and conn.client_voice_stop:
+                 # 直接使用asr_audio中的PCM数据
+                 pcm_bytes = b"".join(conn.asr_audio)
++                conn._stream_event("voice_stop", f"bytes={len(pcm_bytes)}")
+                 # 检查是否有足够的音频数据（每帧1920字节，15帧约28800字节）
+                 if len(pcm_bytes) > 1920 * 15:
+                     await self.handle_voice_stop(conn, [pcm_bytes])
+@@ -85,6 +90,8 @@ class ASRProviderBase(ABC):
+         """并行处理ASR和声纹识别"""
+         try:
+             total_start_time = time.monotonic()
++            # 分阶段计时的零点：这一刻设备的话已经说完、音频到齐
++            turn_timing.start_turn(conn)
+ 
+             # 数据已经是PCM直接使用
+             pcm_data = asr_audio_task
+@@ -134,6 +141,8 @@ class ASRProviderBase(ABC):
+                 # 记录识别结果
+                 if raw_text.get("language"):
+                     logger.bind(tag=TAG).info(f"识别语言: {raw_text['language']}")
++                    # 识别器自己判出的语种最可靠，TURN 行直接用它；没有的 provider 由 chat 按文本兜底
++                    turn_timing.set_field(conn, "lang", raw_text["language"])
+                 if raw_text.get("emotion"):
+                     logger.bind(tag=TAG).info(f"识别情绪: {raw_text['emotion']}")
+                 if raw_text.get("content"):
+@@ -146,6 +155,8 @@ class ASRProviderBase(ABC):
+                 content_for_length_check = raw_text.get("content", "")
+             else:
+                 # 其他 ASR 返回的纯文本
++                # 货道号统一写成「1-7」：识别模型会写成「17」「1/7」「一号期货到」
++                raw_text = normalize_slot_numbers(raw_text)
+                 if raw_text:
+                     logger.bind(tag=TAG).info(f"识别文本: {raw_text}")
+                 if speaker_name:
+@@ -158,6 +169,7 @@ class ASRProviderBase(ABC):
+             # 性能监控
+             total_time = time.monotonic() - total_start_time
+             logger.bind(tag=TAG).debug(f"总处理耗时: {total_time:.3f}s")
++            turn_timing.mark(conn, "asr")
+ 
+             # 检查文本长度
+             text_len, _ = remove_punctuation_and_length(content_for_length_check)
+@@ -168,6 +180,10 @@ class ASRProviderBase(ABC):
+                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
+                 # 使用自定义模块进行上报
+                 await startToChat(conn, enhanced_text)
++            else:
++                # 没识别出内容就没有这一轮：零点作废，免得之后的告别语/提示音拿它打出
++                # first_audio=120s 这种假 TURN 行
++                conn.turn_timing = None
+         except Exception as e:
+             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
+             import traceback
+diff --git a/core/providers/asr/sherpa_onnx_local.py b/core/providers/asr/sherpa_onnx_local.py
+index 54c981a6..35607265 100644
+--- a/core/providers/asr/sherpa_onnx_local.py
++++ b/core/providers/asr/sherpa_onnx_local.py
+@@ -1,3 +1,6 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
++import glob
+ import time
+ import wave
+ import os
+@@ -7,6 +10,8 @@ from config.logger import setup_logging
+ from typing import Optional, Tuple, List
+ from core.providers.asr.dto.dto import InterfaceType
+ from core.providers.asr.base import ASRProviderBase
++from core.utils.audio_filters import apply_filter, highshelf_coeffs
++from core.utils.asr_routing import choose, sensevoice_is_enough
+ 
+ import numpy as np
+ import sherpa_onnx
+@@ -35,17 +40,92 @@ class CaptureOutput:
+ 
+ 
+ class ASRProvider(ASRProviderBase):
++    @staticmethod
++    def _resolve_threads(config):
++        """推理线程数。写死 2 会浪费一半算力，拉满又会把活派到能效核上反而更慢。
++
++        本机（8 核 = 4 性能核 + 4 能效核）实测 whisper-small 单次识别平均耗时：
++          2 线程 1.15s   4 线程 0.76s   6 线程 0.86s   8 线程 1.03s
++        默认取性能核数，取不到就退回 4。配置里给 num_threads 可覆盖。
++        """
++        configured = config.get("num_threads")
++        if configured:
++            try:
++                return max(1, int(configured))
++            except (TypeError, ValueError):
++                pass
++        try:
++            import subprocess
++            out = subprocess.run(["sysctl", "-n", "hw.perflevel0.logicalcpu"],
++                                 capture_output=True, text=True, timeout=2)
++            cores = int(out.stdout.strip())
++            if cores > 0:
++                return min(cores, 8)
++        except Exception:
++            pass
++        try:
++            return max(1, min((os.cpu_count() or 4) // 2, 8))
++        except Exception:
++            return 4
++
+     def __init__(self, config: dict, delete_audio_file: bool):
+         super().__init__()
+         self.interface_type = InterfaceType.LOCAL
+         self.model_dir = config.get("model_dir")
++        self.num_threads = self._resolve_threads(config)
+         self.output_dir = config.get("output_dir")
+         self.model_type = config.get("model_type", "sense_voice")  # 支持 paraformer
+         self.delete_audio_file = delete_audio_file
++        # 听力测试用：每句话的录音和两个模型各自的识别结果存到这里，事后离线逐句核对、
++        # 换别的模型在同一批录音上重跑。会录下说话人的声音，只在测试时开，测完删掉。
++        self.capture_dir = config.get("capture_dir") or None
++        # 识别前补高频。041 用的是 ESP32 板载 PDM 麦克风，实测 4-8kHz 比 Mac 麦克风弱约 7dB，
++        # 辅音（g/k、s/sh、j/q）因此被听混：「顾客」→「姑」、「手机」→「肘机」、「机」→「器」。
++        # 真机录音上 +6dB 把字错率从 19.8% 降到 13.9%；中德英干净语音 12 句结果完全不变。
++        # 0 为关闭。
++        self.highshelf = highshelf_coeffs(
++            float(config.get("highshelf_db") or 0), float(config.get("highshelf_hz") or 3500))
++        if self.capture_dir:
++            os.makedirs(self.capture_dir, exist_ok=True)
++            logger.bind(tag=TAG).warning(f"ASR 录音采集已开启: {self.capture_dir}（测完请关闭并删除）")
+ 
+         # 确保输出目录存在
+         os.makedirs(self.output_dir, exist_ok=True)
+ 
++        if self.model_type == "whisper":
++            # 多语言 Whisper（含德语）：模型需预先放在 model_dir，不走 SenseVoice 自动下载
++            def find(suffix: str) -> str:
++                matches = sorted(glob.glob(os.path.join(self.model_dir, f"*{suffix}")))
++                if not matches:
++                    raise FileNotFoundError(f"Whisper 模型文件缺失: {self.model_dir}/*{suffix}")
++                return matches[0]
++
++            # 固定德语的 Whisper 只在兜底时用，第一次用到才加载，省几百 MB 内存
++            self._whisper_files = (find("-encoder.int8.onnx"), find("-decoder.int8.onnx"), find("-tokens.txt"))
++            self._whisper_de = None
++            with CaptureOutput():
++                self.model = sherpa_onnx.OfflineRecognizer.from_whisper(
++                    encoder=find("-encoder.int8.onnx"),
++                    decoder=find("-decoder.int8.onnx"),
++                    tokens=find("-tokens.txt"),
++                    language=config.get("language", ""),  # 空字符串 = 自动检测
++                    task="transcribe",
++                    num_threads=self.num_threads,
++                    debug=False,
++                )
++                # Whisper base 的中文会漏字且输出繁体；判定为中文/粤语时改用 SenseVoice 重识别
++                self.zh_model = None
++                zh_dir = config.get("zh_model_dir")
++                if zh_dir:
++                    self.zh_model = sherpa_onnx.OfflineRecognizer.from_sense_voice(
++                        model=os.path.join(zh_dir, "model.int8.onnx"),
++                        tokens=os.path.join(zh_dir, "tokens.txt"),
++                        num_threads=self.num_threads,
++                        use_itn=True,
++                        debug=False,
++                    )
++            return
++
+         # 初始化模型文件路径
+         model_files = {
+             "model.int8.onnx": os.path.join(self.model_dir, "model.int8.onnx"),
+@@ -78,7 +158,7 @@ class ASRProvider(ASRProviderBase):
+                 self.model = sherpa_onnx.OfflineRecognizer.from_paraformer(
+                     paraformer=self.model_path,
+                     tokens=self.tokens_path,
+-                    num_threads=2,
++                    num_threads=self.num_threads,
+                     sample_rate=16000,
+                     feature_dim=80,
+                     decoding_method="greedy_search",
+@@ -88,7 +168,7 @@ class ASRProvider(ASRProviderBase):
+                 self.model = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                     model=self.model_path,
+                     tokens=self.tokens_path,
+-                    num_threads=2,
++                    num_threads=self.num_threads,
+                     sample_rate=16000,
+                     feature_dim=80,
+                     decoding_method="greedy_search",
+@@ -123,6 +203,75 @@ class ASRProvider(ASRProviderBase):
+     def requires_file(self) -> bool:
+         return True
+ 
++    @staticmethod
++    def _decode(model, samples, sample_rate):
++        stream = model.create_stream()
++        stream.accept_waveform(sample_rate, samples)
++        model.decode_stream(stream)
++        return stream.result.text, getattr(stream.result, "lang", "").strip("<|>")
++
++    def _route(self, samples, sample_rate):
++        """先 SenseVoice，拿不准再问 Whisper。规则和实测数据见 core/utils/asr_routing.py。
++        SenseVoice 的中文远强于 Whisper，但它不会德语；Whisper 负责认出德语并识别德语。"""
++        sv_text, sv_lang = self._decode(self.zh_model, samples, sample_rate)
++        if sensevoice_is_enough(sv_text, sv_lang) and not self.capture_dir:
++            return sv_text, "zh", None, sv_text
++        whisper_text, whisper_lang = self._decode(self.model, samples, sample_rate)
++        text, lang, need_german = choose(sv_text, sv_lang, whisper_text, whisper_lang)
++        if need_german:
++            try:
++                if self._whisper_de is None:
++                    enc, dec, tok = self._whisper_files
++                    with CaptureOutput():
++                        self._whisper_de = sherpa_onnx.OfflineRecognizer.from_whisper(
++                            encoder=enc, decoder=dec, tokens=tok, language="de",
++                            task="transcribe", num_threads=self.num_threads, debug=False)
++                text, _ = self._decode(self._whisper_de, samples, sample_rate)
++                logger.bind(tag=TAG).info(
++                    f"语种判为 {whisper_lang or '-'}，按德语重识别: {whisper_text!r} -> {text!r}")
++            except Exception as e:
++                # 德语实例加载失败（文件缺、内存不足）不该把整句丢掉：Whisper 的多语言结果已在手
++                logger.bind(tag=TAG).warning(f"德语 Whisper 不可用，沿用多语言结果: {e}")
++                text = whisper_text
++            lang = "de"
++        return text, lang, whisper_text, sv_text
++
++    def _enhance(self, samples):
++        return apply_filter(self.highshelf, samples)
++
++    def _capture(self, file_path, samples, sample_rate, lang, whisper_text, sv_text, final_text, elapsed):
++        """存一份录音，并在 index.jsonl 追加这一句的识别细节。失败不影响识别本身。"""
++        try:
++            import json
++            import shutil
++            from datetime import datetime
++
++            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
++            name = f"{stamp}.wav"
++            shutil.copy(file_path, os.path.join(self.capture_dir, name))
++            x = np.asarray(samples, dtype=np.float32)
++            db = lambda v: round(20 * np.log10(max(float(v), 1e-9)), 1)
++            head = x[: int(0.1 * sample_rate)]
++            record = {
++                "file": name,
++                "time": datetime.now().isoformat(timespec="seconds"),
++                "duration_s": round(len(x) / sample_rate, 2),
++                "peak_dbfs": db(np.max(np.abs(x))) if len(x) else None,
++                "rms_dbfs": db(np.sqrt(np.mean(x ** 2))) if len(x) else None,
++                # 开头 100ms 就已经很响，说明句首可能被截掉了
++                "head_rms_dbfs": db(np.sqrt(np.mean(head ** 2))) if len(head) else None,
++                "clipped_ratio": round(float(np.mean(np.abs(x) > 0.99)), 4) if len(x) else None,
++                "whisper_lang": lang,
++                "whisper_text": whisper_text,
++                "sensevoice_text": sv_text,
++                "final_text": final_text,
++                "asr_seconds": round(elapsed, 3),
++            }
++            with open(os.path.join(self.capture_dir, "index.jsonl"), "a", encoding="utf-8") as f:
++                f.write(json.dumps(record, ensure_ascii=False) + "\n")
++        except Exception as e:
++            logger.bind(tag=TAG).warning(f"ASR 录音采集失败: {e}")
++
+     async def speech_to_text(
+         self, opus_data: List[bytes], session_id: str, artifacts=None
+     ) -> Tuple[Optional[str], Optional[str]]:
+@@ -134,14 +283,19 @@ class ASRProvider(ASRProviderBase):
+             file_path = artifacts.file_path
+ 
+             start_time = time.time()
+-            s = self.model.create_stream()
+             samples, sample_rate = self.read_wave(file_path)
+-            s.accept_waveform(sample_rate, samples)
+-            self.model.decode_stream(s)
+-            text = s.result.text
++            samples = self._enhance(samples)
++            if getattr(self, "zh_model", None) is None:
++                text, lang = self._decode(self.model, samples, sample_rate)
++                whisper_text, sv_text = text, None
++            else:
++                text, lang, whisper_text, sv_text = self._route(samples, sample_rate)
++            elapsed = time.time() - start_time
+             logger.bind(tag=TAG).debug(
+-                f"语音识别耗时: {time.time() - start_time:.3f}s | 结果: {text}"
++                f"语音识别耗时: {elapsed:.3f}s | 语言: {lang or '-'} | 结果: {text}"
+             )
++            if self.capture_dir:
++                self._capture(file_path, samples, sample_rate, lang, whisper_text, sv_text, text, elapsed)
+ 
+             return text, file_path
+ 
+diff --git a/core/providers/llm/base.py b/core/providers/llm/base.py
+index fb206c99..ecc65f9f 100644
+--- a/core/providers/llm/base.py
++++ b/core/providers/llm/base.py
+@@ -21,6 +21,16 @@ class LLMProviderBase(ABC):
+             result += part
+         return result
+     
++    def warmup(self, session_id, system_prompt=""):
++        """握手期 / 启动期预热的钩子。默认什么都不做。
++        只有维护常驻进程或长连接的 provider（如 ClaudeCLI）才需要覆盖；
++        调用方（websocket_server、connection）一律直接调用，不判断 provider 类型。"""
++        return None
++
++    def close_session(self, session_id):
++        """回收 warmup / 对话期间为该会话持有的资源。默认什么都不做。"""
++        return None
++
+     def response_with_functions(self, session_id, dialogue, functions=None):
+         """
+         Default implementation for function calling (streaming)
+diff --git a/core/providers/llm/openai/openai.py b/core/providers/llm/openai/openai.py
+index e67c8333..6e0a2b5b 100644
+--- a/core/providers/llm/openai/openai.py
++++ b/core/providers/llm/openai/openai.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import httpx
+ import openai
+ from openai.types import CompletionUsage
+@@ -69,7 +71,7 @@ class LLMProvider(LLMProviderBase):
+         model_key_msg = check_model_key("LLM", self.api_key)
+         if model_key_msg:
+             logger.bind(tag=TAG).error(model_key_msg)
+-        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout)
++        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout, max_retries=int(config.get("max_retries", 2)))
+ 
+     @staticmethod
+     def normalize_dialogue(dialogue):
+diff --git a/core/providers/tools/server_mcp/mcp_manager.py b/core/providers/tools/server_mcp/mcp_manager.py
+index b1fc0aa3..a1cd7c34 100644
+--- a/core/providers/tools/server_mcp/mcp_manager.py
++++ b/core/providers/tools/server_mcp/mcp_manager.py
+@@ -1,9 +1,12 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ """服务端MCP管理器"""
+ 
+ import asyncio
+ import os
+ import json
+ from typing import Dict, Any, List
++from urllib.parse import urlsplit
+ 
+ from mcp.types import LoggingMessageNotificationParams
+ 
+@@ -15,6 +18,25 @@ TAG = __name__
+ logger = setup_logging()
+ 
+ 
++async def local_endpoint_available(config):
++    """Probe loopback HTTP endpoints only; remote and stdio initialization stay unchanged."""
++    if config.get("command") or not config.get("url"):
++        return True
++    endpoint = urlsplit(config["url"])
++    if endpoint.scheme not in ("http", "https") or endpoint.hostname not in ("127.0.0.1", "localhost", "::1"):
++        return True
++    try:
++        _, writer = await asyncio.wait_for(
++            asyncio.open_connection(endpoint.hostname, endpoint.port or (443 if endpoint.scheme == "https" else 80)),
++            timeout=0.3,
++        )
++        writer.close()
++        await writer.wait_closed()
++        return True
++    except (OSError, asyncio.TimeoutError):
++        return False
++
++
+ class ServerMCPManager:
+     """管理多个服务端MCP服务的集中管理器"""
+ 
+@@ -52,6 +74,9 @@ class ServerMCPManager:
+         try:
+             # 初始化服务端MCP客户端
+             logger.bind(tag=TAG).info(f"初始化服务端MCP客户端: {name}")
++            if not await local_endpoint_available(srv_config):
++                logger.bind(tag=TAG).warning(f"Skipping unavailable local MCP server: {name}")
++                return
+             client = ServerMCPClient(srv_config)
+             # 设置超时时间10秒
+             await asyncio.wait_for(client.initialize(logging_callback=self.logging_callback), timeout=10)
+@@ -66,14 +91,23 @@ class ServerMCPManager:
+             logger.bind(tag=TAG).error(
+                 f"Failed to initialize MCP server {name}: Timeout"
+             )
+-            if client:
+-                await client.cleanup()
++            await self._safe_cleanup(client, name)
+         except Exception as e:
+             logger.bind(tag=TAG).error(
+                 f"Failed to initialize MCP server {name}: {e}"
+             )
+-            if client:
+-                await client.cleanup()
++            await self._safe_cleanup(client, name)
++
++    @staticmethod
++    async def _safe_cleanup(client, name):
++        """初始化被 wait_for 取消后，streamable-http 客户端的 cleanup 常抛 anyio 的
++        跨任务 cancel-scope RuntimeError；让它冲出去会把 gather 里其他 MCP 服务的注册一起打断。"""
++        if client is None:
++            return
++        try:
++            await asyncio.wait_for(client.cleanup(), timeout=5)
++        except Exception as e:
++            logger.bind(tag=TAG).warning(f"MCP server {name} cleanup 失败（已忽略）: {e}")
+ 
+     async def initialize_servers(self) -> None:
+         """初始化所有MCP服务"""
+@@ -131,6 +165,10 @@ class ServerMCPManager:
+         if not target_client:
+             raise ValueError(f"工具 {tool_name} 在任意MCP服务中未找到")
+ 
++        config = self.load_config()
++        if client_name in config and not await local_endpoint_available(config[client_name]):
++            raise ConnectionError("Local MCP endpoint unavailable")
++
+         # 带重试机制的工具调用
+         for attempt in range(max_retries):
+             try:
+diff --git a/core/providers/tools/server_plugins/plugin_executor.py b/core/providers/tools/server_plugins/plugin_executor.py
+index afe89c18..e9b0b6ab 100644
+--- a/core/providers/tools/server_plugins/plugin_executor.py
++++ b/core/providers/tools/server_plugins/plugin_executor.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ """服务端插件工具执行器"""
+ 
+ import asyncio
+@@ -96,7 +98,8 @@ class ServerPluginExecutor(ToolExecutor):
+         tools = {}
+ 
+         # 获取必要的函数
+-        necessary_functions = ["handle_exit_intent", "get_lunar"]
++        # 库存服务不应默认暴露农历等无关工具；需要时由 functions 显式启用。
++        necessary_functions = ["handle_exit_intent"]
+ 
+         # 获取配置中的函数
+         config_functions = self.config["Intent"][
+diff --git a/core/providers/tts/base.py b/core/providers/tts/base.py
+index 2ff779c0..bb4eed8e 100644
+--- a/core/providers/tts/base.py
++++ b/core/providers/tts/base.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import os
+ import re
+ import math
+@@ -7,6 +9,7 @@ import asyncio
+ import threading
+ import traceback
+ import concurrent.futures
++import time
+ 
+ from core.utils import p3
+ from datetime import datetime
+@@ -16,6 +19,7 @@ from abc import ABC, abstractmethod
+ from config.logger import setup_logging
+ from core.utils import opus_encoder_utils
+ from core.utils.tts import MarkdownCleaner, convert_percentage_to_range
++from core.utils.tts_lang_split import guess_language, is_mixed_script
+ from core.utils.output_counter import add_device_output
+ from core.handle.reportHandle import enqueue_tts_report
+ from core.handle.sendAudioHandle import sendAudioMessage
+@@ -31,6 +35,41 @@ TAG = __name__
+ logger = setup_logging()
+ 
+ 
++# 首句本地引擎的语速。没有人需要调它，所以不是配置项。
++_FIRST_SENTENCE_SPEED = 1.0
++
++
++def _speech_weight(text):
++    """粗估一段文字念出来有多长：汉字约 4.5 字/秒，字母数字约 14 个/秒。"""
++    cjk = len(re.findall(r"[一-鿿]", text))
++    latin = len(re.findall(r"[A-Za-z0-9ÄÖÜäöüß]", text))
++    return cjk + latin / 3
++
++
++_SENTENCE_END = re.compile(r"[。！？!?；;]|\.(?=\s)")
++_CLAUSE_END = re.compile(r"[，,、：:]")
++
++
++def _chunk_cut(prefix, limit, first):
++    """超长段落在哪里切。原来取「后半截里最后一个标点或空格」，本地直答整段到达时
++    常切在空格上：「Fried Rice with Asian | Sausage」，菜名中间停顿；中文短首句
++    「现在有七种可买。」也被并进中英混排段，用不上首句本地合成（2026-10-05）。
++    现在按优先级：首段先在第一个句末切（够 4 个字），其余段取后段最后一个句末，
++    再取最后一个逗号顿号，最后才退回空格，空格也找不到就硬切。"""
++    def solid(pos):
++        return len(re.sub(r"\s", "", prefix[:pos])) >= 4
++
++    sentence_cuts = [m.end() for m in _SENTENCE_END.finditer(prefix) if solid(m.end())]
++    if first and sentence_cuts:
++        return sentence_cuts[0]
++    for cuts in (sentence_cuts, [m.end() for m in _CLAUSE_END.finditer(prefix)]):
++        late = [pos for pos in cuts if pos >= limit // 3]
++        if late:
++            return late[-1]
++    spaces = [m.end() for m in re.finditer(r"\s", prefix) if m.end() >= limit // 2]
++    return spaces[-1] if spaces else limit
++
++
+ class TTSProviderBase(ABC):
+     def __init__(self, config, delete_audio_file):
+         self.interface_type = InterfaceType.NON_STREAM
+@@ -41,6 +80,8 @@ class TTSProviderBase(ABC):
+         self.tts_timeout = float(config.get("tts_timeout", 15))
+         if not math.isfinite(self.tts_timeout) or self.tts_timeout <= 0:
+             raise ValueError("tts_timeout must be a positive finite number")
++        self.tts_max_segment_chars = max(0, int(config.get("tts_max_segment_chars", 0)))
++        self.tts_max_attempts = max(1, int(config.get("tts_max_attempts", 5)))
+         self.tts_text_queue = queue.Queue()
+         self.tts_audio_queue = queue.Queue()
+         self.tts_audio_first_sentence = True
+@@ -106,9 +147,46 @@ class TTSProviderBase(ABC):
+             ";",
+             "：",
+         )
++        # 上面两张表里没有英文句号，德语、英语整段因此算作一句：首包音频要等全段
++        # 合成完才发出，比中文（全角「。」本来就在表里）慢一倍。但 . 同时是小数点和
++        # 缩写点，所以只在它后面跟着大写字母开头的下一句时才算句尾，
++        # 2.0、z.B.、Dr. Meier 都不会被切开。
++        self.sentence_period = re.compile(
++            r"(?<!\b[A-Za-zÄÖÜäöüß])"
++            r"(?<!\bz)(?<!\bZ)(?<!\bProf)(?<!\bDr)(?<!\bNr)(?<!\bSt)(?<!\bca)"
++            r"(?<!\busw)(?<!\betc)(?<!\bvs)(?<!\bMr)(?<!\bMrs)"
++            r"\.(?=\s*[A-ZÄÖÜ])"
++        )
++        # 一段至少要有这么多「读音量」才单独送去合成（汉字记 1，字母数字记 1/3，
++        # 大约 0.65 秒语音）。首句从逗号切是为了首包快，但切出来的「Ja」「Sure」
++        # 「你好」只有 0.3-0.4 秒，播完下一段还没合成好，实机上 26% 的句子交界
++        # 有 1.5 秒以上空白。太短就并进后面的文字一起合成。
++        self.min_segment_weight = 3.0
+         self.tts_stop_request = False
+         self.processed_chars = 0
+         self.is_first_sentence = True
++        self.min_segment_weight = float(config.get("min_segment_weight", self.min_segment_weight))
++
++        # 首句本地合成：回答的第一句用本机 sherpa-onnx 出声（0.06-0.1 秒），后面的句子
++        # 仍交给本 provider。为什么见 local_first_sentence.py。放在基类是因为它只用到
++        # 基类的东西（采样率、Opus 编码器、播放队列），任何 provider 都该能用。
++        # 默认关，需显式配置模型目录。认不出语言时按 default_latin 选，子类可改。
++        self.default_latin = "de"
++        self.first_sentence_engine = None
++        if config.get("first_sentence_local"):
++            try:
++                from core.providers.tts.local_first_sentence import shared_engine
++                self.first_sentence_engine = shared_engine(
++                    config.get("first_sentence_models") or {},
++                    vocoder=config.get("first_sentence_vocoder"),
++                    num_threads=config.get("first_sentence_threads"),
++                    speed=_FIRST_SENTENCE_SPEED,
++                )
++                if not config.get("first_sentence_lazy"):
++                    self.first_sentence_engine.preload()
++            except Exception as e:
++                logger.bind(tag=TAG).warning(f"首句本地 TTS 未启用: {e}")
++                self.first_sentence_engine = None
+ 
+     def generate_filename(self, extension=".wav"):
+         return os.path.join(
+@@ -123,15 +201,37 @@ class TTSProviderBase(ABC):
+     def handle_audio_file(self, file_audio: bytes, text):
+         self.before_stop_play_files.append((file_audio, text))
+ 
+-    def to_tts_stream(self, text, opus_handler: Callable[[bytes], None] = None) -> None:
++    def to_tts_stream(self, text, opus_handler: Callable[[bytes], None] = None, is_first_segment=False) -> None:
++        """合成一段文字并把 Opus 帧交给 opus_handler。is_first_segment 由合成线程按
++        本轮是否已送出过段落传入（见 _speak_pending_segment）：首段可以走本地引擎。"""
++        limit = self.tts_max_segment_chars
++        if limit and len(text) > limit:
++            remaining = text
++            first = is_first_segment
++            while len(remaining) > limit:
++                cut = _chunk_cut(remaining[:limit], limit, first)
++                self.to_tts_stream(remaining[:cut], opus_handler=opus_handler, is_first_segment=first)
++                first = False
++                remaining = remaining[cut:]
++            if remaining:
++                self.to_tts_stream(remaining, opus_handler=opus_handler, is_first_segment=first)
++            return None
+         # 保留原始文本用于显示/上报
+         original_text = text
+         text = MarkdownCleaner.clean_markdown(text)
+         # 使用正则一次性替换，避免重复遍历和部分匹配问题
+         if self._correct_words_pattern:
+             text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
+-        max_repeat_time = 5
++        max_repeat_time = self.tts_max_attempts
+         if self.delete_audio_file:
++            # 首句走本地引擎、或子类能边收边转 Opus 时，这里就不必等整句音频到齐。
++            # 返回 True 表示音频已经全部交给 opus_handler；False 表示没处理
++            # （缓存命中、开关关闭、还没发出任何音频就失败），退回下面的整段路径。
++            try:
++                if self.speak_segment(text, original_text, opus_handler, is_first_segment):
++                    return None
++            except Exception as e:
++                logger.bind(tag=TAG).warning(f"流式合成失败，退回整段合成: {original_text}，错误: {e}")
+             # 需要删除文件的直接转为音频数据
+             while max_repeat_time > 0:
+                 try:
+@@ -152,12 +252,12 @@ class TTSProviderBase(ABC):
+                         max_repeat_time -= 1
+                 except Exception as e:
+                     logger.bind(tag=TAG).warning(
+-                        f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
++                        f"语音生成失败{self.tts_max_attempts - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                     )
+                     max_repeat_time -= 1
+             if max_repeat_time > 0:
+                 logger.bind(tag=TAG).info(
+-                    f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
++                    f"语音生成成功: {original_text}，重试{self.tts_max_attempts - max_repeat_time}次"
+                 )
+             else:
+                 logger.bind(tag=TAG).error(
+@@ -172,7 +272,7 @@ class TTSProviderBase(ABC):
+                         asyncio.run(self.text_to_speak(text, tmp_file))
+                     except Exception as e:
+                         logger.bind(tag=TAG).warning(
+-                            f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
++                            f"语音生成失败{self.tts_max_attempts - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                         )
+                         # 未执行成功，删除文件
+                         if os.path.exists(tmp_file):
+@@ -181,7 +281,7 @@ class TTSProviderBase(ABC):
+ 
+                 if max_repeat_time > 0:
+                     logger.bind(tag=TAG).info(
+-                        f"语音生成成功: {original_text}:{tmp_file}，重试{5 - max_repeat_time}次"
++                        f"语音生成成功: {original_text}:{tmp_file}，重试{self.tts_max_attempts - max_repeat_time}次"
+                     )
+                 else:
+                     logger.bind(tag=TAG).error(
+@@ -199,7 +299,7 @@ class TTSProviderBase(ABC):
+         text = MarkdownCleaner.clean_markdown(text)
+         if self._correct_words_pattern:
+             text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
+-        max_repeat_time = 5
++        max_repeat_time = self.tts_max_attempts
+         if self.delete_audio_file:
+             # 需要删除文件的直接转为音频数据
+             while max_repeat_time > 0:
+@@ -219,12 +319,12 @@ class TTSProviderBase(ABC):
+                         max_repeat_time -= 1
+                 except Exception as e:
+                     logger.bind(tag=TAG).warning(
+-                        f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
++                        f"语音生成失败{self.tts_max_attempts - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                     )
+                     max_repeat_time -= 1
+             if max_repeat_time > 0:
+                 logger.bind(tag=TAG).info(
+-                    f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
++                    f"语音生成成功: {original_text}，重试{self.tts_max_attempts - max_repeat_time}次"
+                 )
+             else:
+                 logger.bind(tag=TAG).error(
+@@ -239,7 +339,7 @@ class TTSProviderBase(ABC):
+                         asyncio.run(self.text_to_speak(text, tmp_file))
+                     except Exception as e:
+                         logger.bind(tag=TAG).warning(
+-                            f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
++                            f"语音生成失败{self.tts_max_attempts - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                         )
+                         # 未执行成功，删除文件
+                         if os.path.exists(tmp_file):
+@@ -248,7 +348,7 @@ class TTSProviderBase(ABC):
+ 
+                 if max_repeat_time > 0:
+                     logger.bind(tag=TAG).info(
+-                        f"语音生成成功: {original_text}:{tmp_file}，重试{5 - max_repeat_time}次"
++                        f"语音生成成功: {original_text}:{tmp_file}，重试{self.tts_max_attempts - max_repeat_time}次"
+                     )
+                 else:
+                     logger.bind(tag=TAG).error(
+@@ -264,6 +364,55 @@ class TTSProviderBase(ABC):
+     async def text_to_speak(self, text, output_file):
+         pass
+ 
++    def speak_segment(self, text, original_text, opus_handler, is_first_segment):
++        """一段文字的快路径分派：首段且有本地引擎 → 本地合成；否则交给子类的
++        stream_segment。两者都没接住返回 False，基类走整段路径。"""
++        if not text or not text.strip():
++            return False
++        engine = self.first_sentence_engine
++        # 混合句（「You can eat素炒面 in slot 2-5」）不交给单语本地引擎：见到汉字就判中文，
++        # 中文模型会硬念英文。退回子类，那边有多语音色 / 句内切分处理。
++        if is_first_segment and engine is not None and not is_mixed_script(text):
++            lang = guess_language(text, self.default_latin)
++            if engine.supports(lang):
++                try:
++                    return self._speak_first_locally(text, original_text, opus_handler, lang)
++                except Exception as e:
++                    # 本地引擎出错只影响首句的快慢，不影响能不能答：退回子类
++                    logger.bind(tag=TAG).warning(f"首句本地合成失败，改用 {type(self).__module__.rsplit('.', 1)[-1]}: {e}")
++        return self.stream_segment(text, original_text, opus_handler)
++
++    def _speak_first_locally(self, text, original_text, opus_handler, lang):
++        from pydub import AudioSegment
++        from core.utils.util import trim_silence
++
++        started = time.perf_counter()
++        pcm, sr = self.first_sentence_engine.synthesize(text, lang)
++        if not pcm or len(pcm) < int(sr * 0.05) * 2:
++            # 引擎对 tokens 里没有的字符可能一个样本都不出；此时不能占着「首句」
++            # 位置发一句无声，退回 EdgeTTS（返回 False 由 speak_segment 继续分派）
++            logger.bind(tag=TAG).warning(f"首句本地合成结果为空，改用 EdgeTTS: {original_text}")
++            return False
++        audio = AudioSegment(data=pcm, sample_width=2, frame_rate=sr, channels=1)
++        if sr != self.conn.sample_rate:
++            audio = audio.set_frame_rate(self.conn.sample_rate)
++        audio = trim_silence(audio)
++        self.tts_audio_queue.put(
++            (SentenceType.FIRST, None, original_text, getattr(self, "current_sentence_id", None)))
++        self.opus_encoder.encode_pcm_to_opus_stream(audio.raw_data, end_of_stream=True, callback=opus_handler)
++        logger.bind(tag=TAG).info(
++            f"首句本地合成 {lang} {time.perf_counter() - started:.2f}s（{len(audio) / 1000:.1f}s 音频）: {original_text}")
++        return True
++
++    def stream_segment(self, text, original_text, opus_handler):
++        """边合成边把 Opus 帧交给 opus_handler。默认不支持，返回 False 走整段路径。
++
++        约定：返回 True 前必须先把 (SentenceType.FIRST, None, original_text, sid) 放进
++        tts_audio_queue，再推帧，和整段路径的顺序一致；若在推出第一帧之前失败，
++        返回 False 让基类重试整段合成；推出帧之后失败只能记日志，不能重试（会重复播）。
++        """
++        return False
++
+     def audio_to_pcm_data_stream(
+         self, audio_file_path, callback: Callable[[Any], Any] = None
+     ):
+@@ -292,7 +441,15 @@ class TTSProviderBase(ABC):
+                 sentence_id = str(uuid.uuid4().hex)
+                 conn.sentence_id = sentence_id
+         # 对于单句的文本，进行分段处理
+-        segments = re.split(r"([。！？!?；;\n])", content_detail)
++        # 英文句号也要断句：不断的话德语和英语整段只算一句，首包音频得等整段合成完才发出，
++        # 比中文（全角「。」本来就在切分符里）慢一倍。但 . 同时是小数点和缩写点，
++        # 所以只在它后面紧跟字母时才断，2.0、1-7、z.B. 不受影响。
++        segments = re.split(
++            r"([。！？；;\n]|[!?]|(?<!\b[A-Za-zÄÖÜäöüß])"
++            r"(?<!\bz)(?<!\bZ)(?<!\bProf)(?<!\bDr)(?<!\bNr)(?<!\bSt)(?<!\bca)"
++            r"(?<!\busw)(?<!\betc)(?<!\bvs)(?<!\bMr)(?<!\bMrs)"
++            r"\.(?=\s*[A-ZÄÖÜ]))", content_detail
++        )
+         for seg in segments:
+             self.tts_text_queue.put(
+                 TTSMessageDTO(
+@@ -387,9 +544,7 @@ class TTSProviderBase(ABC):
+                     self.tts_audio_first_sentence = True
+                 elif ContentType.TEXT == message.content_type:
+                     self.tts_text_buff.append(message.content_detail)
+-                    segment_text = self._get_segment_text()
+-                    if segment_text:
+-                        self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
++                    self._speak_pending_segment(opus_handler=self.handle_opus)
+                 elif ContentType.FILE == message.content_type:
+                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
+                     tts_file = message.content_file
+@@ -399,6 +554,7 @@ class TTSProviderBase(ABC):
+                         )
+                 if message.sentence_type == SentenceType.LAST:
+                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
++                    self._play_listen_cue()
+                     self.tts_audio_queue.put(
+                         (message.sentence_type, [], message.content_detail, message.sentence_id)
+                     )
+@@ -483,6 +639,37 @@ class TTSProviderBase(ABC):
+         if hasattr(self, "ws") and self.ws:
+             await self.ws.close()
+ 
++    def _play_listen_cue(self):
++        """回答说完后响一声短提示音，告诉顾客现在可以说话了。
++
++        设备（ESP32，没有回声消除）说话时不收音，播放完才重新打开麦克风。顾客在机器
++        话音刚落时就接话，开头几个字就落在这个空档里没被录到。提示音响完时设备正好
++        开始收音，顾客会自然地等它响完再开口。由 listen_cue 配置开启。
++        """
++        if not self.conn.config.get("listen_cue") or self.conn.client_abort:
++            return
++        try:
++            from core.utils.util import pcm_to_data_stream
++
++            sr = self.conn.sample_rate
++            cache = getattr(self, "_cue_pcm", None)
++            if cache is None or cache[0] != sr:
++                import numpy as np
++
++                def tone(freq, ms):
++                    t = np.arange(int(sr * ms / 1000)) / sr
++                    env = np.minimum(1, np.minimum(t, t[::-1]) / 0.012)  # 12ms 淡入淡出，避免爆音
++                    return np.sin(2 * np.pi * freq * t) * env
++
++                gap = np.zeros(int(sr * 0.12))
++                wave_ = np.concatenate([gap, tone(880, 70), np.zeros(int(sr * 0.03)), tone(1320, 90)])
++                pcm = (wave_ * 0.18 * 32767).astype(np.int16).tobytes()  # 约 -15dBFS，轻而清楚
++                cache = (sr, pcm)
++                self._cue_pcm = cache
++            pcm_to_data_stream(cache[1], True, self.handle_opus, sr, self.opus_encoder)
++        except Exception as e:
++            logger.bind(tag=TAG).warning(f"提示音生成失败: {e}")
++
+     def _get_segment_text(self):
+         # 合并当前全部文本并处理未分割部分
+         full_text = "".join(self.tts_text_buff)
+@@ -503,6 +690,24 @@ class TTSProviderBase(ABC):
+             ):
+                 last_punct_pos = pos
+ 
++        # 英文句号走正则，不能塞进上面的字符表：rfind 认不出缩写点和小数点。
++        # search 取第一个匹配，和上面「取最靠前的切点」保持一致。
++        period = self.sentence_period.search(current_text)
++        if period and (last_punct_pos == -1 or period.start() < last_punct_pos):
++            last_punct_pos = period.start()
++
++        if last_punct_pos != -1 and _speech_weight(current_text[: last_punct_pos + 1]) < self.min_segment_weight:
++            # 切出来太短，往后找第一个够长的切点；找不到就等更多文字
++            later = sorted(
++                [i for i, ch in enumerate(current_text) if ch in punctuations_to_use]
++                + [m.start() for m in self.sentence_period.finditer(current_text)]
++            )
++            last_punct_pos = next(
++                (i for i in later if i > last_punct_pos
++                 and _speech_weight(current_text[: i + 1]) >= self.min_segment_weight),
++                -1,
++            )
++
+         if last_punct_pos != -1:
+             segment_text_raw = current_text[: last_punct_pos + 1]
+             segment_text = textUtils.get_string_no_punctuation_or_emoji(
+@@ -510,8 +715,10 @@ class TTSProviderBase(ABC):
+             )
+             self.processed_chars += len(segment_text_raw)  # 更新已处理字符位置
+ 
+-            # 如果是第一句话，在找到第一个逗号后，将标志设置为False
+-            if self.is_first_sentence:
++            # 如果是第一句话，在找到第一个逗号后，将标志设置为False。
++            # 切出来只剩标点/表情（模型以「……」或 emoji 开头）的空段不算一句，
++            # 否则真正的第一句就失去首句本地合成。
++            if self.is_first_sentence and segment_text:
+                 self.is_first_sentence = False
+ 
+             return segment_text
+@@ -565,11 +772,23 @@ class TTSProviderBase(ABC):
+         if remaining_text:
+             segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
+             if segment_text:
+-                self.to_tts_stream(segment_text, opus_handler=opus_handler)
++                # 整段回答一个标点都没有时（「你好」），剩余文本就是首段
++                first = self.is_first_sentence
++                self.is_first_sentence = False
++                self.to_tts_stream(segment_text, opus_handler=opus_handler, is_first_segment=first)
+                 self.processed_chars += len(full_text)
+                 return True
+         return False
+ 
++    def _speak_pending_segment(self, opus_handler):
++        """从文本缓冲里切出下一段送去合成。is_first_sentence 在 _get_segment_text 切出
++        首段时会被翻成 False，所以要在切之前记下它：这就是「本轮第一段」的判据，
++        只在合成线程里读写，没有和发送线程的 tts_audio_first_sentence 那种竞态。"""
++        first = self.is_first_sentence
++        segment_text = self._get_segment_text()
++        if segment_text:
++            self.to_tts_stream(segment_text, opus_handler=opus_handler, is_first_segment=first)
++
+     def _apply_percentage_params(self, config):
+         """根据子类定义的 TTS_PARAM_CONFIG 批量应用百分比参数"""
+         for config_key, attr_name, min_val, max_val, base_val, transform in self.TTS_PARAM_CONFIG:
+diff --git a/core/providers/tts/edge.py b/core/providers/tts/edge.py
+index bf82ff8d..9cf5612a 100644
+--- a/core/providers/tts/edge.py
++++ b/core/providers/tts/edge.py
+@@ -1,8 +1,56 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
++import asyncio
+ import os
++import re
+ import uuid
+ import edge_tts
++import threading
++from io import BytesIO
++from collections import OrderedDict
+ from datetime import datetime
++import time
++from config.logger import setup_logging
+ from core.providers.tts.base import TTSProviderBase
++from core.providers.tts.dto.dto import SentenceType
++from core.utils.tts_lang_split import detect_latin, dish_languages, guess_language, split_by_language
++from core.utils.util import trim_silence
++
++TAG = __name__
++logger = setup_logging()
++
++
++# At most 128 short MP3 clips, each <= 64 KiB: an 8 MiB upper bound.
++_SHORT_AUDIO_CACHE = OrderedDict()
++_CACHE_LOCK = threading.Lock()
++_MAX_CLIP_BYTES = 64 * 1024
++_MAX_CLIPS = 128
++_MAX_CACHE_TEXT_CHARS = 160
++
++# 流式解码的攒块阈值：首块后至少攒够 4 KiB（约 0.6 秒音频）再解一次码，之后每 8 KiB
++# 解一次，避免 ffmpeg 起太多次。没有人需要按部署调它们，所以不是配置项。
++_STREAM_FIRST_BYTES = 4096
++_STREAM_STEP_BYTES = 8192
++
++# 流式路径的静音裁剪要和整段路径的 trim_silence 等价，阈值直接取它的默认参数，
++# 两边改一处就一起变。
++_LEAD_KEEP_MS, _TAIL_KEEP_MS, _SILENCE_DB = trim_silence.__defaults__
++
++
++def _cache_get(key):
++    with _CACHE_LOCK:
++        data = _SHORT_AUDIO_CACHE.get(key)
++        if data is not None:
++            _SHORT_AUDIO_CACHE.move_to_end(key)
++        return data
++
++
++def _cache_put(key, data):
++    with _CACHE_LOCK:
++        _SHORT_AUDIO_CACHE[key] = data
++        _SHORT_AUDIO_CACHE.move_to_end(key)
++        while len(_SHORT_AUDIO_CACHE) > _MAX_CLIPS:
++            _SHORT_AUDIO_CACHE.popitem(last=False)
+ 
+ 
+ class TTSProvider(TTSProviderBase):
+@@ -19,6 +67,7 @@ class TTSProvider(TTSProviderBase):
+         else:
+             self.voice = config.get("voice")
+         self.audio_file_type = config.get("format", "mp3")
++        self.cache_short_audio = config.get("cache_short_audio", False)
+ 
+         volume = config.get("volume", "50")
+         self.volume = int(volume) if volume else 50
+@@ -36,6 +85,30 @@ class TTSProvider(TTSProviderBase):
+         self.edge_volume = f"{self.volume:+}%"
+         self.edge_pitch = f"{self.pitch_rate:+}Hz"
+ 
++        # 按语言选音色。此前所有语言共用一个德语音色（de-DE-SeraphinaMultilingualNeural），
++        # 它念中文会带德语的发音习惯：同一句中文实测 10.85 秒，中文音色只要 9.05 秒，
++        # 慢 20%，听感上就是含糊。多语音色能读别的语言，但读不好。
++        # 不配 voices 就完全等于现状，只用 self.voice。
++        self.voices = config.get("voices") or {}
++
++        # 句内按语言切段，每段用该语言的音色，并发合成后拼接。
++        # 不切时整句只能交给一个音色：句子里只要有一个汉字就全交给中文音色，
++        # 于是德国顾客听到的「Am Automaten 041 gibt es … 1-6 鸡肉蔬菜蒸饺」整句
++        # 是中文音色在念德语。菜单 220 个菜名里 179 个是中文，这种句子很常见。
++        # 代价是延迟：多段要等最慢的一段，缓存冷时实测多 0.7-2.1 秒，
++        # 菜名进缓存后多约 0.1 秒（解码拼接）。所以默认关闭，见 CONFIG_NOTES.md。
++        # 德英仍建议用 Multilingual 音色：短句的德英判断常常拿不准，判错时
++        # 多语音色还念得下去，原生音色就念坏了。交替实测两类音色首包中位数一样。
++        self.split_languages = bool(config.get("split_languages")) and bool(self.voices)
++        self.default_latin = "en" if (self.voice or "").lower().startswith("en") else "de"
++        self._last_latin = None
++        self._dishes = None
++
++        # 边收边转：EdgeTTS 的 mp3 分 18-40 个小块到达，首块之后的下载和整句解码还要
++        # 0.15-0.6 秒。开着时首块一到就开始解码、编 Opus、推给播放队列，不等整句。
++        # 缓存命中、句内分语言拼接（要等所有段）两种情况仍走整段路径。
++        self.edge_stream_decode = bool(config.get("edge_stream_decode", True))
++
+     def generate_filename(self, extension=".mp3"):
+         return os.path.join(
+             self.output_file,
+@@ -44,31 +117,249 @@ class TTSProvider(TTSProviderBase):
+ 
+     async def text_to_speak(self, text, output_file):
+         try:
++            if self.split_languages:
++                return await asyncio.wait_for(
++                    self._synthesize_split(text, output_file), timeout=self.tts_timeout
++                )
++            return await asyncio.wait_for(
++                self._synthesize(text, output_file), timeout=self.tts_timeout
++            )
++        except asyncio.TimeoutError as exc:
++            raise RuntimeError(f"Edge TTS synthesis timed out after {self.tts_timeout}s") from exc
++
++    def pick_voice(self, text):
++        """按文本语言挑音色。没配 voices 或认不出语言时回落到默认音色。"""
++        if not self.voices:
++            return self.voice
++        lang = guess_language(text, None)
++        return self.voices.get(lang) or self.voice
++
++    def _cache_key(self, text, voice):
++        return (text, voice, self.edge_rate, self.edge_volume, self.edge_pitch, self.audio_file_type)
++
++    def _dish_table(self):
++        """目录菜名及其语言：认出德英菜名，并在判断句子主语言时把菜名剔掉。只加载一次。"""
++        if self._dishes is None:
++            try:
++                from core.utils.menu_knowledge import DEFAULT_CATALOG, load_catalog
++                catalog = load_catalog(str(DEFAULT_CATALOG))
++                dishes = catalog.get("dishes", []) if isinstance(catalog, dict) else catalog
++                self._dishes = dish_languages([d.get("name") for d in dishes])
++            except Exception:
++                self._dishes = []
++        return self._dishes
++
++    def split_pieces(self, text):
++        """[(voice, text)]。认不出德英时沿用这条连接上一次认出来的，顾客一般不会来回换。"""
++        latin = detect_latin(re.sub(r"[\u4e00-\u9fff]", " ", text or ""))
++        if latin:
++            self._last_latin = latin
++        pieces = split_by_language(text, self._dish_table(), self._last_latin or self.default_latin)
++        out = []
++        for lang, part in pieces:
++            voice = self.voices.get(lang) or self.voice
++            if out and out[-1][0] == voice:
++                out[-1] = (voice, out[-1][1] + part)
++            else:
++                out.append((voice, part))
++        return out
++
++    async def _synthesize_split(self, text, output_file):
++        pieces = self.split_pieces(text)
++        if len(pieces) <= 1:
++            voice = pieces[0][0] if pieces else self.voice
++            return await self._synthesize(text, output_file, voice=voice)
++
++        # 各段并发合成：总耗时取最慢的一段，而不是逐段相加。
++        # 段尾的逗号顿号去掉再合成，停顿由下面拼接时补：同一个菜名在不同句子里
++        # 后面跟的标点不同（、，或什么都没有），去掉后才能命中短音频缓存，
++        # 菜名第二次出现就不再走网络。
++        clips = await asyncio.gather(
++            *(self._synthesize(part.strip().rstrip("，,、;；:：").strip() or part, None, voice=voice)
++              for voice, part in pieces)
++        )
++        from pydub import AudioSegment
++
++        joined = AudioSegment.empty()
++        for i, ((voice, part), clip) in enumerate(zip(pieces, clips)):
++            if not clip:
++                raise Exception(f"Edge TTS 分段合成为空: {part}")
++            audio = AudioSegment.from_file(BytesIO(clip), format="mp3", parameters=["-nostdin"])
++            audio = trim_silence(audio.set_channels(1), lead_keep_ms=10, tail_keep_ms=40)
++            if i:
++                # 段与段之间：上一段以标点结尾就停顿一下，没有（「和」+ 菜名）就紧接着念
++                pause = 160 if re.search(r"[，,、;；:：。.!！?？]\s*$", pieces[i - 1][1]) else 0
++                joined += AudioSegment.silent(duration=pause, frame_rate=audio.frame_rate)
++            joined += audio
++        buf = BytesIO()
++        joined.export(buf, format="wav")
++        data = buf.getvalue()
++        if output_file:
++            os.makedirs(os.path.dirname(output_file), exist_ok=True)
++            with open(output_file, "wb") as f:
++                f.write(data)
++            return
++        return data
++
++    async def _synthesize(self, text, output_file, voice=None):
++        try:
++            voice = voice or self.pick_voice(text)
++            cacheable = self.cache_short_audio and 0 < len(text) <= _MAX_CACHE_TEXT_CHARS
++            cache_key = self._cache_key(text, voice)
++            cached = _cache_get(cache_key) if cacheable else None
++            if cached is not None:
++                if output_file:
++                    os.makedirs(os.path.dirname(output_file), exist_ok=True)
++                    with open(output_file, "wb") as f:
++                        f.write(cached)
++                    return
++                return cached
++
+             communicate = edge_tts.Communicate(
+-                text,
+-                voice=self.voice,
+-                rate=self.edge_rate,
+-                volume=self.edge_volume,
+-                pitch=self.edge_pitch,
++                text, voice=voice, rate=self.edge_rate,
++                volume=self.edge_volume, pitch=self.edge_pitch,
+             )
++            audio_bytes = bytearray()
+             if output_file:
+-                # 确保目录存在并创建空文件
+                 os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                 with open(output_file, "wb") as f:
+-                    pass
+-
+-                # 流式写入音频数据
+-                with open(output_file, "ab") as f:  # 改为追加模式避免覆盖
+                     async for chunk in communicate.stream():
+-                        if chunk["type"] == "audio":  # 只处理音频数据块
++                        if chunk["type"] == "audio":
+                             f.write(chunk["data"])
++                            if cacheable:
++                                audio_bytes.extend(chunk["data"])
++                                if len(audio_bytes) > _MAX_CLIP_BYTES:
++                                    cacheable = False
++                                    audio_bytes.clear()
+             else:
+-                # 返回音频二进制数据
+-                audio_bytes = b""
+                 async for chunk in communicate.stream():
+                     if chunk["type"] == "audio":
+-                        audio_bytes += chunk["data"]
+-                return audio_bytes
++                        audio_bytes.extend(chunk["data"])
++                if len(audio_bytes) > _MAX_CLIP_BYTES:
++                    cacheable = False
++
++            result = bytes(audio_bytes)
++            if cacheable and result:
++                _cache_put(cache_key, result)
++            if not output_file:
++                return result
+         except Exception as e:
+             error_msg = f"Edge TTS请求失败: {e}"
+-            raise Exception(error_msg)  # 抛出异常，让调用方捕获
+\ No newline at end of file
++            raise Exception(error_msg)  # 抛出异常，让调用方捕获
++
++    # ---------------- 流式 ----------------
++
++    def stream_segment(self, text, original_text, opus_handler):
++        if not self.edge_stream_decode:
++            return False
++        if self.split_languages and len(self.split_pieces(text)) > 1:
++            return False  # 多段并发拼接要等最慢的一段，没有流式可言
++        voice = self.pick_voice(text)
++        cache_key = self._cache_key(text, voice)
++        if _cache_get(cache_key) is not None:
++            return False  # 命中缓存瞬间就有整句音频，整段路径更省事
++        return asyncio.run(self._stream_edge(text, original_text, opus_handler, voice, cache_key))
++
++    def _drop_encoder_residue(self):
++        """流式路径在首帧前失败时，共享编码器里可能攒了不足一帧的样本；
++        不清掉的话整段回退路径会把它拼到重合成音频前面，听到一小段重复/爆音。
++        只清缓冲，不 reset_state——那会打断 Opus 编码器的连续性。"""
++        try:
++            import numpy as np
++            self.opus_encoder.buffer = np.array([], dtype=np.int16)
++        except Exception:
++            pass
++
++    async def _stream_edge(self, text, original_text, opus_handler, voice, cache_key):
++        """EdgeTTS 边收边解码。mp3 可以从头解任意长度的前缀，所以每次都对已收到的
++        全部字节解一次，再把上次没发过的那一段 PCM 编成 Opus 推出去。
++        静音裁剪与整段路径的 trim_silence 等价：开头静音在第一次发之前跳过，
++        尾部静音永远不发——句中停顿后面若又有语音，停顿会在下一次解码时补发。"""
++        from pydub import AudioSegment
++        from pydub.silence import detect_leading_silence
++
++        sr = self.conn.sample_rate
++        communicate = edge_tts.Communicate(
++            text, voice=voice, rate=self.edge_rate, volume=self.edge_volume, pitch=self.edge_pitch)
++        buf = bytearray()
++        state = {"emitted_ms": 0, "lead_done": False, "decoded_bytes": 0, "frames": 0, "first_frame_at": None}
++        started = time.perf_counter()
++
++        def on_opus(frame):
++            if state["frames"] == 0:
++                self.tts_audio_queue.put(
++                    (SentenceType.FIRST, None, original_text, getattr(self, "current_sentence_id", None)))
++                state["first_frame_at"] = time.perf_counter()
++            state["frames"] += 1
++            opus_handler(frame)
++
++        def flush(final):
++            if len(buf) == state["decoded_bytes"] and not final:
++                return
++            state["decoded_bytes"] = len(buf)
++            try:
++                # 指明 codec，pydub 就不再先起一次 ffprobe 探测格式：每次 flush 少约 25 ms
++                audio = AudioSegment.from_file(BytesIO(bytes(buf)), format="mp3", codec="mp3", parameters=["-nostdin"])
++            except Exception as e:
++                if final:
++                    raise
++                return  # 前缀太短解不出来，等下一块
++            audio = audio.set_channels(1).set_frame_rate(sr).set_sample_width(2)
++            total = len(audio)
++            if not state["lead_done"]:
++                lead = detect_leading_silence(audio, silence_threshold=_SILENCE_DB)
++                if lead >= total:
++                    if not final:
++                        return  # 到目前为止全是静音，还不知道语音从哪开始
++                    lead = 0  # 整句都是静音：和 trim_silence 一样原样放出
++                state["emitted_ms"] = max(0, lead - _LEAD_KEEP_MS)
++                state["lead_done"] = True
++            tail = detect_leading_silence(audio.reverse(), silence_threshold=_SILENCE_DB)
++            speech_end = total - tail + _TAIL_KEEP_MS
++            if final:
++                end = min(total, speech_end)
++            else:
++                # 截断的 mp3 最后一帧不完整，留 120ms 不发；尾部静音也先扣着
++                end = min(total - 120, speech_end)
++            if end <= state["emitted_ms"]:
++                if final:
++                    self.opus_encoder.encode_pcm_to_opus_stream(b"", end_of_stream=True, callback=on_opus)
++                return
++            piece = audio[state["emitted_ms"]:end].raw_data
++            state["emitted_ms"] = end
++            self.opus_encoder.encode_pcm_to_opus_stream(piece, end_of_stream=final, callback=on_opus)
++
++        async def pump():
++            next_at = _STREAM_FIRST_BYTES
++            async for chunk in communicate.stream():
++                if chunk["type"] != "audio":
++                    continue
++                buf.extend(chunk["data"])
++                if len(buf) >= next_at:
++                    flush(final=False)
++                    next_at = len(buf) + _STREAM_STEP_BYTES
++            flush(final=True)
++
++        try:
++            await asyncio.wait_for(pump(), timeout=self.tts_timeout)
++        except Exception as e:
++            if state["frames"] == 0:
++                logger.bind(tag=TAG).warning(f"EdgeTTS 流式合成在首帧前失败，退回整段: {e}")
++                self._drop_encoder_residue()
++                return False
++            logger.bind(tag=TAG).error(f"EdgeTTS 流式合成中途失败（已发 {state['frames']} 帧）: {e}")
++            try:
++                self.opus_encoder.encode_pcm_to_opus_stream(b"", end_of_stream=True, callback=on_opus)
++            except Exception:
++                pass
++            return True
++        if state["frames"] == 0:
++            self._drop_encoder_residue()
++            return False  # 一帧都没有（EdgeTTS 返回空），让整段路径按原逻辑重试
++        if self.cache_short_audio and 0 < len(text) <= _MAX_CACHE_TEXT_CHARS and 0 < len(buf) <= _MAX_CLIP_BYTES:
++            _cache_put(cache_key, bytes(buf))
++        logger.bind(tag=TAG).info(
++            f"EdgeTTS 流式 首帧 {(state['first_frame_at'] - started):.2f}s 全句 {(time.perf_counter() - started):.2f}s "
++            f"{state['frames']} 帧: {original_text}")
++        return True
++
+diff --git a/core/utils/audioRateController.py b/core/utils/audioRateController.py
+index d3027ade..74b57deb 100644
+--- a/core/utils/audioRateController.py
++++ b/core/utils/audioRateController.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import time
+ import asyncio
+ from collections import deque
+@@ -176,6 +178,13 @@ class AudioRateController:
+                 self.logger.bind(tag=TAG).debug("音频发送循环已停止")
+             except Exception as e:
+                 self.logger.bind(tag=TAG).error(f"音频发送循环异常: {e}")
++            finally:
++                # An old cancelled task must not clear a replacement sender's queue.
++                if self.pending_send_task is asyncio.current_task():
++                    self.queue.clear()
++                    self.queue_has_data_event.clear()
++                    self.queue_empty_event.set()
++                    self._last_queue_empty_time = time.monotonic()
+ 
+         self.pending_send_task = asyncio.create_task(_send_loop())
+         return self.pending_send_task
+@@ -185,3 +194,8 @@ class AudioRateController:
+         if self.pending_send_task and not self.pending_send_task.done():
+             self.pending_send_task.cancel()
+             self.logger.bind(tag=TAG).debug("已取消音频发送任务")
++        # A task cancelled before its first step never enters its finally block.
++        self.queue.clear()
++        self.queue_has_data_event.clear()
++        self.queue_empty_event.set()
++        self._last_queue_empty_time = time.monotonic()
+diff --git a/core/utils/context_provider.py b/core/utils/context_provider.py
+index 14943d98..5876598b 100644
+--- a/core/utils/context_provider.py
++++ b/core/utils/context_provider.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import httpx
+ from typing import Dict, Any, List
+ from config.logger import setup_logging
+@@ -11,9 +13,43 @@ class ContextDataProvider:
+         self.config = config
+         self.logger = logger or setup_logging()
+         self.context_data = ""
++        self.structured_data = {}
++        # 库存这一路是否真的取到了数据。不能再靠 context_data 是否为空来推断：
++        # 完整菜单目录是无条件注入的，桥挂掉时 context_data 依然非空。
++        self.inventory_ok = False
+ 
+-    def fetch_all(self, device_id: str) -> str:
++    def _shelf_menu_block(self) -> str:
++        settings = self.config.get("local_menu_knowledge")
++        if not settings:
++            return ""
++        inventory = (self.structured_data or {}).get("inventory")
++        items = inventory.get("items") if isinstance(inventory, dict) else None
++        if not isinstance(items, list):
++            return ""
++        names = [i.get("name") for i in items if isinstance(i, dict)]
++        try:
++            from core.utils.menu_knowledge import shelf_menu_context
++            return shelf_menu_context(names, settings)
++        except Exception as e:
++            self.logger.bind(tag=TAG).warning(f"注入货道商品资料失败: {e}")
++            return ""
++
++    def _full_menu_block(self) -> str:
++        settings = self.config.get("local_menu_knowledge")
++        if not settings:
++            return ""
++        try:
++            from core.utils.menu_knowledge import full_menu_context
++            return full_menu_context(str(settings.get("path") or ""))
++        except Exception as e:
++            self.logger.bind(tag=TAG).warning(f"注入完整菜单失败: {e}")
++            return ""
++
++    def fetch_all(self, device_id: str, refresh: bool = False) -> str:
+         """获取所有配置的上下文数据"""
++        self.structured_data = {}
++        self.context_data = ""
++        self.inventory_ok = False
+         context_providers = self.config.get("context_providers", [])
+         if not context_providers:
+             return ""
+@@ -32,7 +68,10 @@ class ContextDataProvider:
+                 headers["device-id"] = device_id
+                 
+                 # 发送请求
+-                response = httpx.get(url, headers=headers, timeout=3)
++                response = httpx.get(
++                    url, headers=headers, timeout=3,
++                    params=provider.get("refresh_params", {}) if refresh else {},
++                )
+                 
+                 if response.status_code == 200:
+                     result = response.json()
+@@ -41,13 +80,19 @@ class ContextDataProvider:
+                             data = result.get("data")
+                             # 格式化数据
+                             if isinstance(data, dict):
++                                self.structured_data.update(data)
+                                 for k, v in data.items():
++                                    if k in provider.get("structured_fields", []):
++                                        continue
+                                     formatted_lines.append(f"- **{k}：** {v}")
+                             elif isinstance(data, list):
+                                 for item in data:
+                                     formatted_lines.append(f"- {item}")
+                             else:
+                                 formatted_lines.append(f"- {data}")
++                            # 解析成功才算拿到库存；放在前面的话，解析半途抛错会留下
++                            # 「成功」标记 + 残缺上下文，刷新逻辑就不会写入不可用标记
++                            self.inventory_ok = True
+                         else:
+                             self.logger.bind(tag=TAG).warning(f"API {url} 返回错误码: {result.get('msg')}")
+                     else:
+@@ -57,6 +102,19 @@ class ContextDataProvider:
+             except Exception as e:
+                 self.logger.bind(tag=TAG).error(f"获取上下文数据 {url} 失败: {e}")
+         
++        # 把货道上这几件商品的配料与过敏原原文一并注入。
++        # 本地菜品规则链路只认中文菜名，英语德语顾客问「what's inside」
++        # 会落回模型，而模型手里没有资料就会答「系统里没有」——那是假话。
++        shelf_block = self._shelf_menu_block()
++        if shelf_block:
++            formatted_lines.append(shelf_block)
++
++        # 再给一份完整菜单目录。只有货道上那几件时，模型回答「不吃鸡肉有什么选择」
++        # 只能盯着库存说没有；有了全目录才答得出菜单上真正的选项。
++        menu_block = self._full_menu_block()
++        if menu_block:
++            formatted_lines.append(menu_block)
++
+         # 将所有格式化后的行拼接成一个字符串
+         self.context_data = "\n".join(formatted_lines)
+         if self.context_data:
+diff --git a/core/utils/prompt_manager.py b/core/utils/prompt_manager.py
+index edae6e9a..8daf6a51 100644
+--- a/core/utils/prompt_manager.py
++++ b/core/utils/prompt_manager.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ """
+ 系统提示词管理器模块
+ 负责管理和更新系统提示词，包括快速初始化和异步增强功能
+@@ -70,6 +72,7 @@ class PromptManager:
+ 
+         self.context_provider = ContextDataProvider(config, self.logger)
+         self.context_data = {}
++        self.context_lock = threading.RLock()
+ 
+         self._load_base_template()
+ 
+diff --git a/core/utils/textUtils.py b/core/utils/textUtils.py
+index 11dee51f..fb8436b2 100644
+--- a/core/utils/textUtils.py
++++ b/core/utils/textUtils.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import json
+ from typing import TYPE_CHECKING
+ 
+@@ -29,6 +31,12 @@ EMOJI_MAP = {
+     "😏": "confident",
+ }
+ EMOJI_RANGES = [
++    # 附属码位：去掉 🌶️ 时要连同后面的变体选择符 U+FE0F 一起去掉，否则字幕残留不可见字符
++    # （2026-10-05「鱼香茄子盖饭️」）。还有零宽连接符、键帽符、国旗区域指示符。
++    (0xFE00, 0xFE0F),
++    (0x200D, 0x200D),
++    (0x20E3, 0x20E3),
++    (0x1F1E6, 0x1F1FF),
+     (0x1F600, 0x1F64F),
+     (0x1F300, 0x1F5FF),
+     (0x1F680, 0x1F6FF),
+@@ -68,6 +76,8 @@ def is_punctuation_or_emoji(char):
+         '"',  # 中文双引号 + 英文引号
+         "：",
+         ":",  # 中文冒号 + 英文冒号
++        "；",
++        ";",  # 中文分号 + 英文分号：漏了会被合成器当成词念出来
+         "-",
+         "－",  # 英文连字符 + 中文全角横线
+         "、",  # 中文顿号
+diff --git a/core/utils/util.py b/core/utils/util.py
+index 9b056c66..c98b070c 100644
+--- a/core/utils/util.py
++++ b/core/utils/util.py
+@@ -1,3 +1,5 @@
++# 本文件来自上游 xiaozhi-esp32-server，含 SmartFoodie 041 定制改动（Heyao Rong，2026-09 至 2026-10）；改动范围见 CONTRIBUTIONS.md
++# From upstream xiaozhi-esp32-server, with SmartFoodie 041 customisations by Heyao Rong (2026-09 to 2026-10); scope in CONTRIBUTIONS.en.md
+ import re
+ import os
+ import json
+@@ -226,6 +228,28 @@ def extract_json_from_string(input_string):
+     return None
+ 
+ 
++def trim_silence(audio, lead_keep_ms=30, tail_keep_ms=100, threshold_db=-50.0):
++    """裁掉合成音频首尾的静音。
++
++    EdgeTTS 会把短句补到约 1.87 秒，多出来的全是静音：「gerne」实际发音 0.44 秒，
++    尾部静音 1.21 秒，开头还有 150-230 毫秒。按句合成再逐句拼接时，每个句子
++    交界处都白白多出一秒多的空白，实机上听起来就是断断续续。
++    首尾各留一点，避免吃掉起音和尾音。
++    """
++    from pydub.silence import detect_leading_silence
++
++    total = len(audio)
++    if total == 0:
++        return audio
++    lead = detect_leading_silence(audio, silence_threshold=threshold_db)
++    if lead >= total:
++        return audio  # 整段都是静音，原样返回，交给上游判断
++    tail = detect_leading_silence(audio.reverse(), silence_threshold=threshold_db)
++    start = max(0, lead - lead_keep_ms)
++    end = min(total, total - tail + tail_keep_ms)
++    return audio[start:end]
++
++
+ def audio_to_data_stream(
+     audio_file_path, is_opus=True, callback: Callable[[Any], Any] = None, sample_rate=16000, opus_encoder=None
+ ) -> None:
+@@ -233,6 +257,13 @@ def audio_to_data_stream(
+     file_type = os.path.splitext(audio_file_path)[1]
+     if file_type:
+         file_type = file_type.lstrip(".")
++    # 按内容认格式，扩展名不可靠（EdgeTTS 句内多语言拼接时写的是 WAV）
++    try:
++        with open(audio_file_path, "rb") as f:
++            if f.read(4) == b"RIFF":
++                file_type = "wav"
++    except OSError:
++        pass
+     # 读取音频文件，-nostdin 参数：不要从标准输入读取数据，否则FFmpeg会阻塞
+     audio = AudioSegment.from_file(
+         audio_file_path, format=file_type, parameters=["-nostdin"]
+@@ -240,6 +271,7 @@ def audio_to_data_stream(
+ 
+     # 转换为单声道/指定采样率/16位小端编码（确保与编码器匹配）
+     audio = audio.set_channels(1).set_frame_rate(sample_rate).set_sample_width(2)
++    audio = trim_silence(audio)
+ 
+     # 获取原始PCM数据（16位小端）
+     raw_data = audio.raw_data
+@@ -334,11 +366,15 @@ def audio_bytes_to_data_stream(
+         # 直接用p3解码
+         return p3.decode_opus_from_bytes_stream(audio_bytes, callback)
+     else:
++        # 按内容认格式：EdgeTTS 声明 mp3，但句内多语言拼接时返回的是 WAV
++        if audio_bytes[:4] == b"RIFF":
++            file_type = "wav"
+         # 其他格式用pydub
+         audio = AudioSegment.from_file(
+             BytesIO(audio_bytes), format=file_type, parameters=["-nostdin"]
+         )
+         audio = audio.set_channels(1).set_frame_rate(sample_rate).set_sample_width(2)
++        audio = trim_silence(audio)
+         raw_data = audio.raw_data
+         pcm_to_data_stream(raw_data, is_opus, callback, sample_rate, opus_encoder)
+ 
+diff --git a/core/websocket_server.py b/core/websocket_server.py
+index c1cb4a54..7230f4a1 100644
+--- a/core/websocket_server.py
++++ b/core/websocket_server.py
+@@ -68,11 +68,35 @@ class WebSocketServer:
+         expire_seconds = auth_config.get("expire_seconds", None)
+         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+ 
++    async def _warm_llm_on_startup(self):
++        """服务一起来就先热一次 LLM。
++        实测重启后第一个连接的握手期预热要 3.69 秒，之后的连接只要 1.3–1.7 秒：
++        差的那两秒是 claude 可执行文件冷启动与登录态校验，和具体连接无关。
++        在这里用一个一次性会话把它付掉，第一位顾客就不用多等。
++        走 LLMProviderBase.warmup 接口：不需要预热的 provider 默认是空操作，
++        这里不判断 provider 类型；失败只告警，不影响服务启动。"""
++        llm = self._llm
++        if llm is None:
++            return
++        session_id = "startup-warm"
++        try:
++            await asyncio.to_thread(llm.warmup, session_id)
++        except Exception as e:
++            self.logger.bind(tag=TAG).warning(f"启动期 ClaudeCLI 预热失败: {e}")
++        finally:
++            try:
++                llm.close_session(session_id)
++            except Exception:
++                pass
++
+     async def start(self):
+         server_config = self.config["server"]
+         host = server_config.get("ip", "0.0.0.0")
+         port = int(server_config.get("port", 8000))
+ 
++        # 不 await：预热在后台跑，监听端口照常立刻打开
++        asyncio.create_task(self._warm_llm_on_startup())
++
+         async with websockets.serve(
+             self._handle_connection,
+             host,
+diff --git a/pyproject.toml b/pyproject.toml
+index 6f099877..cf20b7bf 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,10 @@
+ [tool.pytest.ini_options]
+ asyncio_mode = "auto"
+-testpaths = ["tests"]
++# tests_smartfoodie 此前不在 testpaths 里，裸跑 pytest 会 0 失败通过
++# 但一个 SmartFoodie 测试都不跑——假绿灯。P-1 修正。
++testpaths = ["tests", "tests_smartfoodie"]
++# 让 test_chain_recovery.py 不必再靠 PYTHONPATH=. 才能 import core
++pythonpath = ["."]
+ python_files = ["test_*.py"]
+ python_classes = ["Test*"]
+ python_functions = ["test_*"]

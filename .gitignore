@@ -1,0 +1,31 @@
+# 运行时与缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+*.log
+.DS_Store
+
+# 大模型文件与本地环境（不入库）
+server/main/xiaozhi-server/models/
+server/main/xiaozhi-server/tmp/
+server/main/xiaozhi-server/data/.config.yaml
+server/main/xiaozhi-server/data/*.db
+bridge/.venv/
+bridge/src/*.egg-info/
+bridge/work/*.log
+
+# 备份目录只放链接
+backups/
+
+# 凭据
+.env
+
+# 进程 PID
+run/
+
+# 设备 NVS 镜像含 WiFi 凭据，不入库（2026-10-15 已从历史移除）
+device-backup/
+
+# 性能基线日志是 README 引用的实测证据，不受 *.log 规则影响
+!docs/perf/*.log

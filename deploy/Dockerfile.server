@@ -1,0 +1,11 @@
+# SmartFoodie 041 语音服务端。基于上游 xiaozhi-esp32-server 的 server-base 镜像（含 torch、sherpa-onnx 等重依赖）。
+# 模型文件（约 1.9 GB）不打进镜像，运行时挂载到 /opt/airobot/server/main/xiaozhi-server/models。
+FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base
+
+WORKDIR /opt/airobot
+COPY server/main/xiaozhi-server /opt/airobot/server/main/xiaozhi-server
+COPY launchers /opt/airobot/launchers
+# 上游基础镜像已装齐 requirements.txt；这里只补 SmartFoodie 新增的测试依赖之外的运行依赖（目前无）。
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000 8003
+CMD ["python", "/opt/airobot/launchers/start_server.py"]

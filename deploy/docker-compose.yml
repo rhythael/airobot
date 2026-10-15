@@ -1,0 +1,28 @@
+# SmartFoodie 041 语音助手：库存桥 + 语音服务端。在仓库根目录执行：
+#   cp .env.example .env && 编辑 .env
+#   cp launchers/config.example.yaml server/main/xiaozhi-server/data/.config.yaml
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# 服务端通过 host 网络监听 8000/8003（设备靠局域网 IP 找它，且要能回连 127.0.0.1:8766 的桥）。
+services:
+  bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.bridge
+    env_file: ../.env
+    environment:
+      ALLOWED_MACHINE_NUMBERS: "041"
+    network_mode: host          # 桥只监听 127.0.0.1:8766，服务端在同一主机上访问
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    env_file: ../.env
+    depends_on: [bridge]
+    network_mode: host
+    volumes:
+      - ../server/main/xiaozhi-server/models:/opt/airobot/server/main/xiaozhi-server/models:ro
+      - ../server/main/xiaozhi-server/data:/opt/airobot/server/main/xiaozhi-server/data
+      - ../server/main/xiaozhi-server/tmp:/opt/airobot/server/main/xiaozhi-server/tmp
+    restart: unless-stopped

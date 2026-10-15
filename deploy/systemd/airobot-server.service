@@ -1,0 +1,18 @@
+# 041 语音服务端。桥先起。
+[Unit]
+Description=SmartFoodie 041 voice server (:8000 ws, :8003 ota)
+After=network-online.target airobot-bridge.service
+Wants=network-online.target
+Requires=airobot-bridge.service
+
+[Service]
+Type=simple
+User=airobot
+WorkingDirectory=/opt/airobot
+EnvironmentFile=/opt/airobot/.env
+ExecStart=/opt/airobot/.venv/bin/python /opt/airobot/launchers/start_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

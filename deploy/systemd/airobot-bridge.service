@@ -1,0 +1,18 @@
+# 041 库存桥。安装：复制到 /etc/systemd/system/，按实际路径改 WorkingDirectory / ExecStart / User，
+# 然后 systemctl daemon-reload && systemctl enable --now airobot-bridge
+[Unit]
+Description=SmartFoodie 041 inventory bridge (:8766)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airobot
+WorkingDirectory=/opt/airobot
+EnvironmentFile=/opt/airobot/.env
+ExecStart=/opt/airobot/.venv/bin/python /opt/airobot/launchers/start_bridge.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

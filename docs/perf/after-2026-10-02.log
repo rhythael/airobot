@@ -1,0 +1,71 @@
+### run1 | 41号机器现在有什么吃的？
+[ 0.01s] 识别: 41号机器现在有什么吃的？
+[ 0.71s] 播报: 现在有两种可买。素炒面在2-5货道
+[ 4.08s] 播报: Geschmorte Rindfleischnudeln (ohne Suppe)在2-7货道
+结果: 首包音频 0.71s, 音频帧 138 个（约 8.3s）, 句子 2
+### run1 | Was gibt es gerade am Automaten 41?
+[ 0.00s] 识别: Was gibt es gerade am Automaten 41?
+[ 1.06s] 播报: Es gibt zwei Gerichte
+[ 3.19s] 播报: Fach 2-5 素炒面, Fach 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 9.50s] 播报: Suppe)
+结果: 首包音频 1.07s, 音频帧 144 个（约 8.6s）, 句子 3
+### run1 | What can I buy at machine 41 right now?
+[ 0.01s] 识别: What can I buy at machine 41 right now?
+[ 0.94s] 播报: Two items are available
+[ 2.99s] 播报: Slot 2-5 素炒面, Slot 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 8.94s] 播报: Suppe)
+结果: 首包音频 0.94s, 音频帧 142 个（约 8.5s）, 句子 3
+### run2 | 41号机器现在有什么吃的？
+[ 0.01s] 识别: 41号机器现在有什么吃的？
+[ 0.74s] 播报: 现在有两种可买。素炒面在2-5货道
+[ 4.11s] 播报: Geschmorte Rindfleischnudeln (ohne Suppe)在2-7货道
+结果: 首包音频 0.74s, 音频帧 138 个（约 8.3s）, 句子 2
+### run2 | Was gibt es gerade am Automaten 41?
+[ 0.01s] 识别: Was gibt es gerade am Automaten 41?
+[ 1.11s] 播报: Es gibt zwei Gerichte
+[ 1.90s] 播报: Fach 2-5 素炒面, Fach 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 8.26s] 播报: Suppe)
+结果: 首包音频 1.11s, 音频帧 142 个（约 8.5s）, 句子 3
+### run2 | What can I buy at machine 41 right now?
+[ 0.00s] 识别: What can I buy at machine 41 right now?
+[ 1.11s] 播报: Two items are available
+[ 2.19s] 播报: Slot 2-5 素炒面, Slot 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 8.20s] 播报: Suppe)
+结果: 首包音频 1.11s, 音频帧 142 个（约 8.5s）, 句子 3
+### run3 | 41号机器现在有什么吃的？
+[ 0.01s] 识别: 41号机器现在有什么吃的？
+[ 0.44s] 播报: 现在有两种可买。素炒面在2-5货道
+[ 3.80s] 播报: Geschmorte Rindfleischnudeln (ohne Suppe)在2-7货道
+结果: 首包音频 0.44s, 音频帧 138 个（约 8.3s）, 句子 2
+### run3 | Was gibt es gerade am Automaten 41?
+[ 0.01s] 识别: Was gibt es gerade am Automaten 41?
+[ 0.58s] 播报: Es gibt zwei Gerichte
+[ 1.49s] 播报: Fach 2-5 素炒面, Fach 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 7.85s] 播报: Suppe)
+结果: 首包音频 0.59s, 音频帧 144 个（约 8.6s）, 句子 3
+### run3 | What can I buy at machine 41 right now?
+[ 0.01s] 识别: What can I buy at machine 41 right now?
+[ 0.70s] 播报: Two items are available
+[ 1.84s] 播报: Slot 2-5 素炒面, Slot 2-7 Geschmorte Rindfleischnudeln (ohne 
+[ 7.84s] 播报: Suppe)
+结果: 首包音频 0.70s, 音频帧 143 个（约 8.6s）, 句子 3
+### llm | 我不吃鸡肉，有什么推荐？
+[ 0.01s] 识别: 我不吃鸡肉，有什么推荐？
+[ 1.45s] 播报: 菜单上有牛肉
+[ 2.48s] 播报: 猪肉、羊肉、虾和素食的选择，比如尖椒牛肉盖饭、梅菜扣肉盖饭、素炒面
+[ 9.80s] 播报: 不过这台机器现在只有素炒面和一份德餐可以买
+结果: 首包音频 1.45s, 音频帧 221 个（约 13.3s）, 句子 3
+### llm | Welche Gerichte sind vegetarisch?
+[ 0.01s] 识别: Welche Gerichte sind vegetarisch?
+[ 1.76s] 播报: Es gibt viele vegetarische Optionen auf dem Menü
+[ 5.42s] 播报: zum Beispiel Fischaubergine-Reis, Gemüse-Kung-Pao-Tofu-Reis,
+[10.10s] 播报:  Pilz-Bao, saure Bambussprossen-Bao und viele mehr
+[14.00s] 播报: Momentan haben wir aber nur Stir-Fried Noodles in Slot 2-5
+结果: 首包音频 1.76s, 音频帧 274 个（约 16.4s）, 句子 4
+### llm | I'm allergic to peanuts, what can I eat?
+[ 0.01s] 识别: I'm allergic to peanuts, what can I eat?
+[ 2.48s] 播报: You can eat素炒面 in slot 2-5 or Geschmorte Rindfleischnudeln 
+[ 3.74s] 播报: in slot 2-7
+[ 5.18s] 播报: Both are safe for peanut allergies
+[ 7.47s] 播报: Check the packaging as well to be sure
+结果: 首包音频 2.48s, 音频帧 137 个（约 8.2s）, 句子 4

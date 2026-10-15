@@ -1,0 +1,10 @@
+# SmartFoodie 041 库存桥：只装语音链路需要的依赖（fastmcp + httpx）。
+FROM python:3.12-slim
+WORKDIR /opt/airobot
+COPY bridge /opt/airobot/bridge
+COPY launchers/serve_inventory_bridge.py launchers/start_bridge.py /opt/airobot/launchers/
+RUN pip install --no-cache-dir /opt/airobot/bridge
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8766
+# 直接起桥：凭据由 compose 的 env_file 注入
+CMD ["python", "/opt/airobot/launchers/serve_inventory_bridge.py"]
