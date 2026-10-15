@@ -7,7 +7,7 @@ SmartFoodie 041 定制（作者：Heyao Rong，2026-09）。
 凭据只从环境变量 / 仓库根目录的 .env 读，传给桥进程的环境，不落盘、不打印：
   SF_APP_KEY                    Central Kitchen App Key（必填）
   ALLOWED_MACHINE_NUMBERS       默认 041
-  CENTRAL_KITCHEN_BASE_URL      默认 https://inventory-api.example.com/prod-api
+  CENTRAL_KITCHEN_BASE_URL      默认 https://inventory-api.example.com/api
   BRIDGE_PYTHON                 桥用的 Python（可选；不给则依次找 <repo>/bridge/.venv、
                                 ~/.venvs/tuya-enterprise-bridge，最后用当前解释器）
 
@@ -35,7 +35,7 @@ REQUIRED = [
 # 有默认值，通常不必单独给
 OPTIONAL_DEFAULTS = {
     "ALLOWED_MACHINE_NUMBERS": "041",
-    "CENTRAL_KITCHEN_BASE_URL": "https://inventory-api.example.com/prod-api",
+    "CENTRAL_KITCHEN_BASE_URL": "https://inventory-api.example.com/api",
 }
 
 

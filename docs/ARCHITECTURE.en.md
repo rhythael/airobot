@@ -30,7 +30,7 @@ Inventory bridge bridge/ (tuya_enterprise_bridge.machine_mcp_server, 127.0.0.1:8
    ├ inventory.py          locate machine 041 by store name, read 18 slots, build purchasable / expired / empty lists
    └ central_kitchen.py    ⑤ signed GET getStoreList / getStoreGoodsShelvesList
                  ▼
-Central Kitchen API  https://inventory-api.example.com/prod-api (signed with SF_APP_KEY)
+Central Kitchen API  https://inventory-api.example.com/api (signed with SF_APP_KEY)
 ```
 
 ## Interface contracts
@@ -41,7 +41,7 @@ Central Kitchen API  https://inventory-api.example.com/prod-api (signed with SF_
 | ② device ↔ server | WebSocket, Xiaozhi protocol | binary frames = Opus 16 kHz; JSON: `hello` / `listen` / `tts` (start, sentence_start, stop) / `stt` / `llm` |
 | ③ server → bridge | `GET /context[?fresh=1]`, returns `{code, data}` | `code≠0` means the upstream failed and the server says "inventory temporarily unavailable". **The keys of `data` are literally the instructions given to the model**; `data.inventory` is the structured list for local answers (`machine_number`, `items[{slot,name,quantity,purchasable}]`) |
 | ④ server → bridge | MCP over HTTP `/mcp`, read-only tool `machine_inventory_query` | not used by the current model; kept for models with function calling |
-| ⑤ bridge → Central Kitchen | GET + `appKey/timeStamp/sign` (sha256) | 5 s timeout; a store counts as 041 when its name ends in `041` and storeId ≠ 61 |
+| ⑤ bridge → Central Kitchen | GET + `app_key/ts/sign` (sha256) | 5 s timeout; a store counts as 041 when its name ends in `041` and not on the exclusion list |
 
 ## How to replace a part
 

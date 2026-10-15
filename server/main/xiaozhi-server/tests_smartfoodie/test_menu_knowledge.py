@@ -53,7 +53,7 @@ class MenuKnowledgeTests(unittest.TestCase):
         # 带门店身份才用门店价，不带就用总部默认价。
         with_store, _ = self.answer(
             'YZ004D多少钱？',
-            settings={'path': str(DEFAULT_CATALOG), 'store_name': 'M-Edeka-Ernst-047'})
+            settings={'path': str(DEFAULT_CATALOG), 'store_name': 'STORE-A'})
         self.assertIn('门店标价', with_store)
         self.assertIn('5.49欧元', with_store)
 

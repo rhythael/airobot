@@ -8,6 +8,9 @@ from .central_kitchen import CentralKitchenClient, CentralKitchenError
 
 
 MACHINE_SUFFIX = re.compile(r"-(\d{2,3})$")
+# 门店列表里与售货机无关的条目（内部测试门店等）按 ID 排除；公开版留空
+_EXCLUDED_STORE_IDS: frozenset[int] = frozenset()
+
 QUERY_TYPES = {"inventory_status", "empty_slots", "expired_items", "refill_status", "products"}
 # 商品名自带装饰性 emoji（🌱🐮🐔🌶️）；语音助手会把它们念出来，先去掉。
 EMOJI = re.compile(
@@ -72,7 +75,7 @@ class InventoryService:
                 name = store.get("storeName")
                 store_id = store.get("storeId")
                 match = MACHINE_SUFFIX.search(name) if isinstance(name, str) else None
-                if store_id != 61 and match and match.group(1).zfill(3) == machine:
+                if store_id not in _EXCLUDED_STORE_IDS and match and match.group(1).zfill(3) == machine:
                     matches.append((int(store_id), name))
             if len(matches) != 1:
                 return self._result("not_found", "无法唯一定位041号机器，请检查门店配置。")

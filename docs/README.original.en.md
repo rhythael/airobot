@@ -49,7 +49,7 @@ Server  xiaozhi-esp32-server  :8000 (OTA :8003)
    └─ mcp   /mcp          ──► inventory bridge :8766   tool calls (rarely used once the snapshot is injected)
                                    │
                                    ▼
-                        Central Kitchen API  inventory-api.example.com/prod-api
+                        Central Kitchen API  inventory-api.example.com/api
 ```
 
 ## Layout

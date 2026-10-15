@@ -30,7 +30,7 @@ ESP32 设备（固件 firmware/，未改动）
    ├ inventory.py          按门店名定位 041，读 18 个货道，拼可购买清单 / 过期 / 空货道
    └ central_kitchen.py    ⑤ 签名 GET getStoreList / getStoreGoodsShelvesList
                  ▼
-中央厨房 API  https://inventory-api.example.com/prod-api（SF_APP_KEY 签名）
+中央厨房 API  https://inventory-api.example.com/api（SF_APP_KEY 签名）
 ```
 
 ## 接口契约
@@ -41,7 +41,7 @@ ESP32 设备（固件 firmware/，未改动）
 | ② 设备 ↔ 服务端 | WebSocket，小智协议 | 二进制帧 = Opus 16 kHz；JSON：`hello` / `listen` / `tts`(start, sentence_start, stop) / `stt` / `llm` |
 | ③ 服务端 → 桥 | `GET /context[?fresh=1]`，回 `{code, data}` | `code≠0` 表示上游失败，服务端改说「暂时查不到库存」。**`data` 里的键名就是给模型的指令**；`data.inventory` 是本地直答用的结构化清单（`machine_number`, `items[{slot,name,quantity,purchasable}]`） |
 | ④ 服务端 → 桥 | MCP over HTTP `/mcp`，只读工具 `machine_inventory_query` | 现在的模型不调工具，保留给支持 function call 的模型 |
-| ⑤ 桥 → 中央厨房 | GET + `appKey/timeStamp/sign`（sha256） | 5 秒超时；门店名以 `041` 结尾且 storeId≠61 才算 041 |
+| ⑤ 桥 → 中央厨房 | GET + `app_key/ts/sign`（sha256） | 5 秒超时；门店名以 `041` 结尾且 不在排除名单内 才算 041 |
 
 ## 怎么换
 

@@ -21,7 +21,7 @@ def main():
     if allowed != frozenset({"041"}):
         raise SystemExit("ALLOWED_MACHINE_NUMBERS must be exactly 041")
     base_url = os.environ.get(
-        "CENTRAL_KITCHEN_BASE_URL", "https://inventory-api.example.com/prod-api"
+        "CENTRAL_KITCHEN_BASE_URL", "https://inventory-api.example.com/api"
     ).rstrip("/")
     client = CentralKitchenClient(base_url, key)
     service = InventoryService(client, allowed)

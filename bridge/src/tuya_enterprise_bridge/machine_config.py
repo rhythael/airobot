@@ -41,7 +41,7 @@ class MachineSettings:
             sf_app_key=_required(env, "SF_APP_KEY"),
             central_kitchen_base_url=env.get(
                 "CENTRAL_KITCHEN_BASE_URL",
-                "https://inventory-api.example.com/prod-api",
+                "https://inventory-api.example.com/api",
             ).rstrip("/"),
             allowed_machine_numbers=allowed,
         )

@@ -43,7 +43,7 @@ To reconstruct a working tree: clone [xiaozhi-esp32-server](https://github.com/x
 
 ## What was removed or replaced
 
-Internal API host, router and device MAC addresses, store name and device serial, device NVS images (contain WiFi credentials), audio samples, the company PDF. Keys were never in the repository. Machine number `041` is an internal index and was left as is.
+Internal API host and endpoint paths (generalised to `/api/stores` etc.), signing parameter names, router and device MAC addresses, store names (mapped to STORE-A…E), the internal test-store exclusion, device serial, the catalogue's source file hash, device NVS images (contain WiFi credentials), audio samples, the company PDF, and the separate enterprise-data-platform code. Keys were never in the repository. Machine number `041` is an internal index and was left as is; dish names, ingredients and prices are what customers see on the machine.
 
 ## Authorship
 

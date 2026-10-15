@@ -50,7 +50,7 @@ ESP32（aa:bb:cc:dd:ee:ff，固件 2.2.2）
    └─ mcp   /mcp          ──► 库存桥 :8766   工具调用（预取生效后很少走）
                                    │
                                    ▼
-                        Central Kitchen API  inventory-api.example.com/prod-api
+                        Central Kitchen API  inventory-api.example.com/api
 ```
 
 ## 目录结构

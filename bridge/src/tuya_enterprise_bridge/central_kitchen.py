@@ -47,7 +47,7 @@ class CentralKitchenClient:
         self.now = now
 
     def _get(self, endpoint: str, business: Mapping[str, str] | None = None):
-        params = {"appKey": self._app_key, "timeStamp": str(int(self.now() * 1000))}
+        params = {"app_key": self._app_key, "ts": str(int(self.now() * 1000))}
         params.update(business or {})
         material = "&".join(f"{key}={value}" for key, value in sorted(params.items()))
         params["sign"] = hashlib.sha256((material + self._app_key).encode()).hexdigest()
@@ -64,7 +64,7 @@ class CentralKitchenClient:
         return payload.get("data")
 
     def get_store_list(self) -> list[dict]:
-        data = self._get("/centralKitchen/api/getStoreList")
+        data = self._get("/api/stores")
         if not isinstance(data, list):
             raise CentralKitchenError("invalid store list")
         return data
@@ -74,7 +74,7 @@ class CentralKitchenClient:
             raise CentralKitchenError("store ids required")
         value = ",".join(str(int(store_id)) for store_id in store_ids)
         data = self._get(
-            "/centralKitchen/api/getStoreGoodsShelvesList",
+            "/api/store-shelves",
             {"storeIdList": value},
         )
         if not isinstance(data, dict):

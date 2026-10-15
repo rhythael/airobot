@@ -23,7 +23,7 @@ ESP32 ──ws──> xiaozhi-server (:8000)
                   └──mcp───> 041 桥 (:8766) /mcp       ← 工具调用（现在很少走）
                                   │
                                   └──> Central Kitchen API
-                                       inventory-api.example.com/prod-api
+                                       inventory-api.example.com/api
 ```
 
 ### 两个仓库
