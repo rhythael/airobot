@@ -301,7 +301,7 @@ def build_payload(last_user, system_prompt, *, missed_turns, forced_language, me
     always_directive：无粘性语言时也附语言指令。常驻进程有上一轮的语境可依赖，可以不附；
     无状态 provider 每轮都是新请求，附上更稳。
     context_turns：模型已经见过、但其中提到的菜可能不在货架上的最近几轮。无状态 provider 传它，
-    顾客问「Was ist da drin?」时才有 Dampfnudel 的配料可答（交付验证时 Doubao 答成了货单）。
+    顾客问「Was ist da drin?」时才有 Dampfnudel 的配料可答（交付验证时云端模型答成了货单）。
     """
     forced, requested, language_now = update_forced_language(forced_language, last_user)
     payload = last_user

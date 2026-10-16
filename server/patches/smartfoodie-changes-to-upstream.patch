@@ -404,7 +404,7 @@ index 718f3909..48b915cd 100644
 +            # 此前这里从不回收，只靠 provider 内 600 秒的惰性回收兜底；
 +            # 而那个回收只在 _get_session 里顺带触发，没有新连接时永远不跑。
 +            # 实测：0 条连接时仍挂着 3 个子进程共 194MB，其中一个空闲 700 秒仍存活。
-+            # 用 hasattr 守卫，其他 provider（openai/豆包等）没有这个方法，一行都不会跑到。
++            # 用 hasattr 守卫，其他 provider（openai 等）没有这个方法，一行都不会跑到。
 +            llm = getattr(self, "llm", None)
 +            if llm is not None and hasattr(llm, "close_session"):
 +                try:

@@ -57,7 +57,7 @@ class ShapeDialogueTests(unittest.TestCase):
 
     def test_pronoun_followup_gets_facts_of_the_dish_from_history(self):
         # 上一轮本地直答了 Dampfnudel 的价格，这一轮「Was ist da drin?」：Dampfnudel 不在货架上，
-        # 模型手里没有它的配料。交付验证时 Doubao 把这句答成了货单。
+        # 模型手里没有它的配料。交付验证时云端模型把这句答成了货单。
         shaped = ts.shape_dialogue(dialogue("Was kostet die Dampfnudel mit Vanillesauce?", "Was ist da drin?"), {}, MENU)
         content = shaped[-1]["content"]
         self.assertIn("指的就是它", content)

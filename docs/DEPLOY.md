@@ -17,7 +17,7 @@
 ```bash
 cp .env.example .env                                   # 填 LLM_API_KEY、SF_APP_KEY
 cp launchers/config.example.yaml server/main/xiaozhi-server/data/.config.yaml
-# 检查 selected_module（默认 LLM=DoubaoLLM，可换成任一 type: openai 的条目）、模型目录、端口
+# 检查 selected_module（默认 LLM=CloudLLM，可换成任一 type: openai 的条目）、模型目录、端口
 ```
 
 密钥只在 `.env` 里，启动脚本注入内存；`data/.config.yaml` 里不放密钥。

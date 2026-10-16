@@ -6,8 +6,6 @@ SmartFoodie 041 定制（作者：Heyao Rong，2026-09 至 2026-10）。
 
 凭据只从环境变量 / 仓库根目录的 .env 读，注入内存后交给服务端，data/.config.yaml 里永远不放密钥：
   LLM_API_KEY            selected_module.LLM 所选大模型的 API Key（ClaudeCLI 不需要）
-  SPEECH_APPID           火山语音合成的 appid（只有选 HuoshanDoubleStreamTTS 时需要）
-  SPEECH_ACCESS_TOKEN    火山语音合成的 access_token
 
   cp launchers/config.example.yaml server/main/xiaozhi-server/data/.config.yaml   # 首次
   cp .env.example .env && 编辑 .env                                              # 首次
@@ -178,8 +176,6 @@ def apply_overrides(config: dict, key: str) -> dict:
         provider["refresh_params"] = {"fresh": "1"}
         provider["structured_fields"] = ["inventory"]
 
-    # 火山语音服务用的是另一套凭据（appid + access_token），和大模型的 API Key 无关。
-    # 只有当所选 TTS 需要它们、且环境变量里给了，才注入；没给就保持原样，用 EdgeTTS 不受影响。
     tts_name, tts_config = _selected("TTS")
     if tts_config.get("type") == "edge" or tts_name == "EdgeTTS":
         tts_config["cache_short_audio"] = True
@@ -196,11 +192,6 @@ def apply_overrides(config: dict, key: str) -> dict:
             "en": str(SERVER_DIR / "models/tts/vits-piper-en_US-lessac-high"),
         }
         tts_config["first_sentence_vocoder"] = str(SERVER_DIR / "models/tts/vocos-22khz-univ.onnx")
-    for field, account in (("appid", "SPEECH_APPID"), ("access_token", "SPEECH_ACCESS_TOKEN")):
-        if field in tts_config and not tts_config[field]:
-            value = credential(account)
-            if value:
-                tts_config[field] = value
     return config
 
 

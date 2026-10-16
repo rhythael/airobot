@@ -23,7 +23,7 @@ server:
 selected_module:
   VAD: SileroVAD
   ASR: WhisperASR
-  LLM: DoubaoLLM   # OpenAI 兼容接口，任何机器都能用；ClaudeCLI 依赖个人 Claude Code 登录，仅限开发机
+  LLM: CloudLLM   # 任一 OpenAI 兼容接口，任何机器都能用；ClaudeCLI 依赖个人 Claude Code 登录，仅限开发机
   TTS: EdgeTTS
   Memory: nomem
   Intent: function_call
@@ -54,20 +54,13 @@ ASR:
     highshelf_db: 6
 
 LLM:
-  # 备用：火山方舟 DeepSeek-V4-Flash 正式版（已开通，剩约 240 万 / 共 250 万免费 tokens）。
-  # 比豆包快 2-6 秒，但会念出内部思考、德语提问用中文回答，所以没选它。
-  ArkLLM:
+  # 云端大模型：任一 OpenAI 兼容接口都可以。填 base_url 与 model_name，Key 放 .env 的 LLM_API_KEY。
+  # 选型时实测过的取舍：会念出内部思考、或德语提问用中文回答的模型不要用；
+  # 严格守语言规则、不念内部思考的模型即使慢 2-6 秒也优先选。
+  CloudLLM:
     type: openai
-    model_name: deepseek-v4-flash-ga-260731
-    base_url: https://ark.cn-beijing.volces.com/api/v3
-    api_key: ""
-    max_tokens: 160
-  # 当前在用：火山方舟豆包 lite（已开通，50 万免费 tokens，与 DeepSeek 的额度互相独立）。
-  # 比 DeepSeek 慢 2-6 秒，但严格守语言规则、不念内部思考，所以选它。
-  DoubaoLLM:
-    type: openai
-    model_name: doubao-seed-2-0-lite-260428
-    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model_name: your-model-name
+    base_url: https://your-llm-provider.example.com/v1
     api_key: ""
     max_tokens: 160
   # 备用：你已有的 DeepSeek Key，改 selected_module.LLM 即可切回
@@ -106,21 +99,6 @@ TTS:
     # 首包优化（edge_stream_decode / first_sentence_local / first_sentence_models /
     # first_sentence_vocoder）由 launchers/start_server.py 注入，要关闭或换模型改那边。
     output_dir: tmp/
-  # 火山双向流式：边生成边播，首包可压到 1 秒内；EdgeTTS 要整句合成完才返回，所以首包要等好几秒。
-  # 用它需要先在控制台建应用并开通「语音合成大模型」：
-  #   https://console.volcengine.com/speech/service/10007
-  # appid 和 access_token 是语音服务自己的凭据（和方舟 API Key 无关），
-  # 存进钥匙串 smartfoodie-xiaozhi-server 的 SPEECH_APPID / SPEECH_ACCESS_TOKEN，
-  # 由 start_server.py 注入内存，不写在本文件里。
-  # 注意：部分外语音色仅支持单向流，双向流调用会直接报错，选音色时要避开。
-  HuoshanDoubleStreamTTS:
-    type: huoshan_double_stream
-    ws_url: wss://openspeech.bytedance.com/api/v3/tts/bidirection
-    appid: ""
-    access_token: ""
-    resource_id: volc.service_type.10029
-    speaker: zh_female_wanwanxiaohe_moon_bigtts
-    enable_ws_reuse: True
 
 # 只保留 MCP 工具：关掉联网搜索、天气、新闻、音乐等插件，
 # 它们会把「41号机器」这类问题带偏成联网搜索。MCP 工具由服务端自动注入，不写在这里。

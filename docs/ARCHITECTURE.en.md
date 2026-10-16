@@ -47,7 +47,7 @@ Central Kitchen API  https://inventory-api.example.com/api (signed with SF_APP_K
 
 | To change | Edit |
 |---|---|
-| the LLM | `selected_module.LLM` in `data/.config.yaml` → any entry with `type: openai` (Volcengine, DeepSeek, OpenAI, local vLLM …); the key goes into `.env` as `LLM_API_KEY`. Turn shaping (`turn_shaping.py`) applies to every provider |
+| the LLM | `selected_module.LLM` in `data/.config.yaml` → any entry with `type: openai` (DeepSeek, OpenAI, local vLLM …); the key goes into `.env` as `LLM_API_KEY`. Turn shaping (`turn_shaping.py`) applies to every provider |
 | speech synthesis | `selected_module.TTS`; local first-sentence synthesis needs the Piper / Matcha models under `models/tts/`, otherwise it falls back to the cloud voice automatically |
 | the ASR models | `ASR.WhisperASR.model_dir` / `zh_model_dir`; must be whisper-small (see CONFIG_NOTES) |
 | the inventory source | the two requests in `bridge/src/tuya_enterprise_bridge/central_kitchen.py`; keep the output structure of `inventory.py` |

@@ -47,7 +47,7 @@ ESP32 设备（固件 firmware/，未改动）
 
 | 想换 | 改哪里 |
 |---|---|
-| 大模型 | `data/.config.yaml` 的 `selected_module.LLM` 指向任一 `type: openai` 的条目（火山方舟、DeepSeek、OpenAI、本地 vLLM …），Key 放 `.env` 的 `LLM_API_KEY`。整形逻辑（`turn_shaping.py`）对所有 provider 生效 |
+| 大模型 | `data/.config.yaml` 的 `selected_module.LLM` 指向任一 `type: openai` 的条目（DeepSeek、OpenAI、本地 vLLM …），Key 放 `.env` 的 `LLM_API_KEY`。整形逻辑（`turn_shaping.py`）对所有 provider 生效 |
 | 语音合成 | `selected_module.TTS`；首句本地合成需要 `models/tts/` 下的 Piper / Matcha 模型，没有就自动退回云端合成 |
 | 识别模型 | `ASR.WhisperASR.model_dir` / `zh_model_dir`；必须 whisper-small（见 CONFIG_NOTES） |
 | 库存来源 | 换 `bridge/src/tuya_enterprise_bridge/central_kitchen.py` 的两个请求，保持 `inventory.py` 的输出结构 |

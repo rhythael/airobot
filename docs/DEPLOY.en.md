@@ -17,7 +17,7 @@
 ```bash
 cp .env.example .env                                   # fill in LLM_API_KEY, SF_APP_KEY
 cp launchers/config.example.yaml server/main/xiaozhi-server/data/.config.yaml
-# check selected_module (default LLM=DoubaoLLM, any type: openai entry works), model directories, ports
+# check selected_module (default LLM=CloudLLM, any type: openai entry works), model directories, ports
 ```
 
 Secrets live only in `.env`; the launchers inject them into memory. `data/.config.yaml` never holds a key.

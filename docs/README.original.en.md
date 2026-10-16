@@ -43,7 +43,7 @@ ESP32 (aa:bb:cc:dd:ee:ff, firmware 2.2.2)
    ▼
 Server  xiaozhi-esp32-server  :8000 (OTA :8003)
    ├─ ASR  sherpa-onnx: SenseVoice first, Whisper only when unsure
-   ├─ LLM  any OpenAI-compatible endpoint (default: Volcengine Doubao; ClaudeCLI is dev-machine only)
+   ├─ LLM  any OpenAI-compatible endpoint (default: any OpenAI-compatible cloud model; ClaudeCLI is dev-machine only)
    ├─ TTS  EdgeTTS (plus an offline sherpa-onnx + Piper provider)
    ├─ http  GET /context  ──► inventory bridge :8766   refreshed every turn, injected into the prompt; most questions answered locally
    └─ mcp   /mcp          ──► inventory bridge :8766   tool calls (rarely used once the snapshot is injected)
@@ -126,7 +126,7 @@ All optimisations can be switched off individually, see `server/main/xiaozhi-ser
 2. ~~Inventory snapshot fetched only at handshake~~ now refreshed at the start of every turn (`turn_context.py`).
 3. The degraded path still takes 9.28 s (10 s wait in `mcp_manager.py`); do not simply shorten it.
 4. The Central Kitchen API has no list prices; the catalogue price from the menu import is spoken with "the price on the machine applies". Where the price master data lives is **unanswered**.
-5. The Volcengine API key was once visible in a screenshot — **rotate it**.
+5. The LLM API key used during development was once visible in a screenshot — **rotate it** before go-live.
 6. ~~14 uncommitted bridge files~~ committed on 2026-10-09.
 7. ~~No remote~~ pushed to GitHub on 2026-10-15.
 8. ~~No autostart~~ `deploy/systemd/` and `deploy/docker-compose.yml` provided; on the macOS dev machine it is still a manual `scripts/start-all.sh`.

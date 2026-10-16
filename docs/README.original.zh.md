@@ -44,7 +44,7 @@ ESP32（aa:bb:cc:dd:ee:ff，固件 2.2.2）
    ▼
 服务端 xiaozhi-esp32-server  :8000（OTA :8003）
    ├─ ASR  sherpa-onnx：SenseVoice 优先，拿不准再问 Whisper
-   ├─ LLM  任一 OpenAI 兼容接口（默认火山方舟豆包；ClaudeCLI 仅开发机）
+   ├─ LLM  任一 OpenAI 兼容接口（默认任一 OpenAI 兼容云端模型；ClaudeCLI 仅开发机）
    ├─ TTS  EdgeTTS（另有本地 sherpa-onnx + Piper 离线 provider）
    ├─ http  GET /context  ──► 库存桥 :8766   每轮刷新库存，注入提示词；多数问题本地直答
    └─ mcp   /mcp          ──► 库存桥 :8766   工具调用（预取生效后很少走）
@@ -137,7 +137,7 @@ scripts/sim.sh audio tests/acceptance/xxx.wav           # 完整链路
 2. ~~库存快照只在握手时抓一次~~ 已改为每轮对话入口刷新（`turn_context.py`），长对话不再过期。
 3. 降级路径仍需 9.28 s（`mcp_manager.py` 的 10 s 等待），不要简单调短。
 4. 中央厨房 API 没有挂牌价，提示词已禁止报价；定价主数据在哪**待回答**。
-5. 方舟 API key 曾在截图中暴露，**待轮换**。
+5. 开发期用过的大模型 API key 曾在截图中暴露，上线前**待轮换**。
 6. ~~桥仓库 14 个未提交文件待裁决~~ 2026-10-09 已作为提交 `feat(bridge): /context 支持 fresh=1…` 入库。
 7. ~~没有远端~~ 2026-10-15 已推送到 https://github.com/SmartFoodieEu/voice_robot（标签 `v1.0-handoff`）。
 8. ~~launchd 开机自启未做~~ 交付版提供 `deploy/systemd/` 与 `deploy/docker-compose.yml`；开发机（macOS）仍是手动 `scripts/start-all.sh`。

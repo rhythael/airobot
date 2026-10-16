@@ -9,7 +9,7 @@
 selected_module:
   VAD: SileroVAD
   ASR: WhisperASR
-  LLM: DoubaoLLM      # 任一 type: openai 的条目；ClaudeCLI 仅开发机
+  LLM: CloudLLM       # 任一 type: openai 的条目；ClaudeCLI 仅开发机
   TTS: EdgeTTS
   Memory: nomem
   Intent: function_call
@@ -225,7 +225,7 @@ done
 
 **未默认启用的原因**：音质需要人工判断。EdgeTTS 的神经音色更自然，Piper medium
 偏合成感。对照样本在 `/tmp/voicecmp/`（edge-*.mp3 与 piper-*.wav 是同一句话）。
-火山双向流式 TTS 已否决：音色库 114 条里没有德语。
+云端双向流式 TTS 已否决：音色库里没有德语。
 
 ## 首包优化：EdgeTTS 流式转码 + 首句本地合成（2026-10-02）
 

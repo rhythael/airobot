@@ -25,7 +25,7 @@ class _FakeProviderWithClose:
 
 
 class _FakeProviderWithoutClose:
-    """模拟 openai/豆包 这类 provider，没有 close_session。"""
+    """模拟 openai 这类 provider，没有 close_session。"""
 
 
 class _FakeSession:
